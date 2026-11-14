@@ -28,6 +28,7 @@ import {
     construirBloquesSubtitulos,
     construirArchivoTxt,
     elegirPistaSubtitulo,
+    parseSubtitleVTT,
     parsearPayloadSubtitulo,
     parsearRespuestaGetTranscript,
     parsearRespuestaGetPanel,
@@ -46,6 +47,252 @@ export function marcarTimedtextBloqueado(ms = 90000) {
     if (hasta > _timedtextBloqueadoHasta) {
         _timedtextBloqueadoHasta = hasta;
     }
+}
+
+const INVIDIOUS_SEEDS = Object.freeze([
+    'https://yt.chocolatemoo53.com'
+]);
+const _invidiousHostFallidos = new Map();
+let _invidiousInstanciasCache = [];
+let _invidiousInstanciasExpira = 0;
+let _invidiousInstanciasPromesa = null;
+
+async function fetchPublicoCors(url, timeoutMs = 6500) {
+    verificarCancelacion();
+    try {
+        return await peticionHttpBaja(url, {
+            method: 'GET',
+            preferirFetch: true,
+            anonymous: true,
+            timeout: timeoutMs
+        });
+    } catch (e) {
+        if (e?.esCancelacion || cancelado) throw e;
+    }
+    verificarCancelacion();
+    return peticionHttpBaja(url, {
+        method: 'GET',
+        preferirFetch: false,
+        anonymous: true,
+        timeout: timeoutMs
+    });
+}
+
+async function obtenerInstanciasInvidiousCors() {
+    const ahora = Date.now();
+    const filtrarSanas = lista =>
+        lista.filter(base => !_invidiousHostFallidos.has(base) || ahora >= _invidiousHostFallidos.get(base));
+
+    if (_invidiousInstanciasCache.length > 0 && ahora < _invidiousInstanciasExpira) {
+        return filtrarSanas(_invidiousInstanciasCache);
+    }
+
+    if (!_invidiousInstanciasPromesa) {
+        _invidiousInstanciasPromesa = (async () => {
+            const descubiertas = [];
+            try {
+                const res = await fetchPublicoCors('https://api.invidious.io/instances.json', 4500);
+                if (res?.status === 200 && res.text) {
+                    const lista = JSON.parse(res.text);
+                    if (Array.isArray(lista)) {
+                        lista
+                            .filter(([, meta]) => meta && meta.api && meta.cors && meta.type === 'https' && meta.uri)
+                            .sort((a, b) => Number(b[1]?.monitor?.uptime || 0) - Number(a[1]?.monitor?.uptime || 0))
+                            .forEach(([, meta]) => {
+                                const uri = String(meta.uri).replace(/\/+$/, '');
+                                if (uri && !descubiertas.includes(uri)) descubiertas.push(uri);
+                            });
+                    }
+                }
+            } catch (e) {
+                if (e?.esCancelacion || cancelado) throw e;
+            }
+            const combinadas = Array.from(new Set([...descubiertas, ...INVIDIOUS_SEEDS]));
+            _invidiousInstanciasCache = combinadas;
+            _invidiousInstanciasExpira = Date.now() + (descubiertas.length > 0 ? 30 * 60 * 1000 : 2 * 60 * 1000);
+            return combinadas;
+        })().finally(() => {
+            _invidiousInstanciasPromesa = null;
+        });
+    }
+
+    const baseList = await _invidiousInstanciasPromesa;
+    return filtrarSanas(baseList);
+}
+
+function elegirPistaInvidious(captions, idiomaPreferido = 'es', pistaPreferida = null) {
+    if (!Array.isArray(captions) || !captions.length) return null;
+
+    const pistas = captions
+        .map(c => ({
+            languageCode: String(c?.languageCode || c?.language_code || '').trim(),
+            label: String(c?.label || ''),
+            url: String(c?.url || ''),
+            esAuto: /auto[- ]?generat|autom[aá]tic/i.test(String(c?.label || ''))
+        }))
+        .filter(p => p.languageCode || p.url);
+
+    if (!pistas.length) return null;
+
+    const baseObjetivo = String(idiomaPreferido || 'es').toLowerCase().split('-')[0];
+    const esMismoIdioma = (code, baseTarget) => {
+        const clean = String(code || '').toLowerCase();
+        return clean === baseTarget || clean.startsWith(`${baseTarget}-`);
+    };
+
+    const prefManual = pistas.find(p => esMismoIdioma(p.languageCode, baseObjetivo) && !p.esAuto);
+    if (prefManual) return { ...prefManual, necesitaTraducir: false };
+
+    const prefAuto = pistas.find(p => esMismoIdioma(p.languageCode, baseObjetivo));
+    if (prefAuto) return { ...prefAuto, necesitaTraducir: false };
+
+    if (pistaPreferida?.languageCode) {
+        const basePref = String(pistaPreferida.languageCode).toLowerCase().split('-')[0];
+        const matchPref =
+            pistas.find(p => p.languageCode.toLowerCase() === String(pistaPreferida.languageCode).toLowerCase()) ||
+            pistas.find(p => esMismoIdioma(p.languageCode, basePref));
+        if (matchPref) return { ...matchPref, necesitaTraducir: true };
+    }
+
+    const enManual = pistas.find(p => esMismoIdioma(p.languageCode, 'en') && !p.esAuto);
+    if (enManual) return { ...enManual, necesitaTraducir: true };
+
+    const enAuto = pistas.find(p => esMismoIdioma(p.languageCode, 'en'));
+    if (enAuto) return { ...enAuto, necesitaTraducir: true };
+
+    const origManual = pistas.find(p => !p.esAuto);
+    if (origManual) return { ...origManual, necesitaTraducir: true };
+
+    return { ...pistas[0], necesitaTraducir: true };
+}
+
+function distribuirTraduccionPorCaracteres(batch, textoTraducido) {
+    const palabras = textoTraducido.replace(/\s+/g, ' ').trim().split(/\s+/).filter(Boolean);
+    if (!palabras.length) return batch;
+    const totalChars = batch.reduce((acc, c) => acc + Math.max(1, c.text.length), 0);
+    let cursor = 0;
+
+    return batch.map((cue, idx) => {
+        if (idx === batch.length - 1) {
+            const resto = palabras.slice(cursor).join(' ').trim();
+            return { ...cue, text: resto || cue.text };
+        }
+        const proporcion = Math.max(1, cue.text.length) / totalChars;
+        const cantidad = Math.max(1, Math.round(proporcion * palabras.length));
+        const trozo = palabras.slice(cursor, cursor + cantidad).join(' ').trim();
+        cursor += cantidad;
+        return { ...cue, text: trozo || cue.text };
+    });
+}
+
+async function traducirSubtitulosGtx(subtitulos, idiomaOrigen = 'auto', idiomaDestino = 'es') {
+    if (!Array.isArray(subtitulos) || !subtitulos.length) return [];
+    const baseDst = String(idiomaDestino || 'es').toLowerCase().split('-')[0];
+    const srcNorm = String(idiomaOrigen || 'auto').trim();
+    const baseSrc = /^auto$/i.test(srcNorm) ? 'auto' : srcNorm.split('-')[0].toLowerCase();
+    if (baseSrc !== 'auto' && baseSrc === baseDst) return subtitulos;
+
+    const salida = [];
+    let i = 0;
+    while (i < subtitulos.length) {
+        verificarCancelacion();
+        const batch = [];
+        let acumuladoLen = 0;
+        while (i < subtitulos.length && batch.length < 25) {
+            const cand = subtitulos[i];
+            const lineaLimpia = String(cand.text || '').replace(/\r?\n/g, ' ').trim();
+            const costo = encodeURIComponent(`${lineaLimpia}\n`).length;
+            if (batch.length > 0 && acumuladoLen + costo > 1300) break;
+            batch.push({ ...cand, text: lineaLimpia });
+            acumuladoLen += costo;
+            i++;
+        }
+
+        const q = batch.map(c => c.text).join('\n');
+        const trUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(baseSrc)}&tl=${encodeURIComponent(baseDst)}&dt=t&q=${encodeURIComponent(q)}`;
+        try {
+            const res = await fetchPublicoCors(trUrl, 7000);
+            if (res?.status === 200 && res.text) {
+                const parsed = JSON.parse(res.text);
+                if (Array.isArray(parsed?.[0])) {
+                    const textoTr = parsed[0].map(seg => seg?.[0] || '').join('');
+                    const lineasTr = textoTr.replace(/\r/g, '').split('\n');
+                    if (lineasTr.length === batch.length) {
+                        for (let j = 0; j < batch.length; j++) {
+                            salida.push({
+                                ...batch[j],
+                                text: lineasTr[j].trim() || batch[j].text
+                            });
+                        }
+                        continue;
+                    }
+                    salida.push(...distribuirTraduccionPorCaracteres(batch, textoTr));
+                    continue;
+                }
+            }
+        } catch (e) {
+            if (e?.esCancelacion || cancelado) throw e;
+        }
+        salida.push(...batch);
+    }
+
+    return salida;
+}
+
+export async function obtenerSubtitulosViaInvidious(videoId, idiomaPreferido = 'es', opciones = {}) {
+    const instancias = await obtenerInstanciasInvidiousCors();
+    const limite = instancias.slice(0, 3);
+
+    for (const baseUrl of limite) {
+        verificarCancelacion();
+        try {
+            const resLista = await fetchPublicoCors(`${baseUrl}/api/v1/captions/${encodeURIComponent(videoId)}`, 6500);
+            if (resLista.status === 429 || resLista.status === 403 || resLista.status >= 500 || !resLista.status) {
+                _invidiousHostFallidos.set(baseUrl, Date.now() + 90000);
+                continue;
+            }
+            if (resLista.status !== 200 || !resLista.text) continue;
+
+            let dataLista;
+            try {
+                dataLista = JSON.parse(resLista.text);
+            } catch {
+                _invidiousHostFallidos.set(baseUrl, Date.now() + 90000);
+                continue;
+            }
+
+            if (Array.isArray(dataLista?.captions) && dataLista.captions.length === 0) {
+                return [];
+            }
+
+            const pista = elegirPistaInvidious(dataLista?.captions, idiomaPreferido, opciones?.pistaPreferida || null);
+            if (!pista) continue;
+
+            const vttUrl = pista.url && pista.url.startsWith('/')
+                ? `${baseUrl}${pista.url}`
+                : `${baseUrl}/api/v1/captions/${encodeURIComponent(videoId)}?lang=${encodeURIComponent(pista.languageCode)}`;
+
+            const resVtt = await fetchPublicoCors(vttUrl, 7500);
+            if (resVtt.status === 429 || resVtt.status === 403 || resVtt.status >= 500 || !resVtt.status) {
+                _invidiousHostFallidos.set(baseUrl, Date.now() + 90000);
+                continue;
+            }
+            if (resVtt.status !== 200 || !resVtt.text) continue;
+
+            let subs = decodeSubtitles(parseSubtitleVTT(resVtt.text)).filter(s => s.text.length > 0);
+            if (subs.length > 0) {
+                if (pista.necesitaTraducir && idiomaPreferido) {
+                    subs = await traducirSubtitulosGtx(subs, pista.languageCode || 'auto', idiomaPreferido);
+                }
+                return subs;
+            }
+        } catch (e) {
+            if (e?.esCancelacion || cancelado) throw e;
+            _invidiousHostFallidos.set(baseUrl, Date.now() + 90000);
+        }
+    }
+
+    return [];
 }
 
 export function extraerDatosLigerosDeHtmlWatch(html) {
@@ -701,8 +948,12 @@ export async function procesarVideoATxt(itemVideo) {
                 if (infoMovil?.fecha && infoMovil.fecha !== '0000-00-00' && fecha === '0000-00-00') {
                     fecha = infoMovil.fecha;
                 }
-                if (infoMovil?.playabilityStatus && infoMovil.playabilityStatus !== 'OK' && estadoPlayability === 'OK') {
-                    estadoPlayability = infoMovil.playabilityStatus;
+                if (infoMovil?.playabilityStatus) {
+                    if (infoMovil.playabilityStatus === 'OK') {
+                        estadoPlayability = 'OK';
+                    } else if (estadoPlayability === 'OK') {
+                        estadoPlayability = infoMovil.playabilityStatus;
+                    }
                 }
 
                 if (infoMovil?.pistas?.length > 0) {
@@ -742,7 +993,7 @@ export async function procesarVideoATxt(itemVideo) {
                 const datosHtml = extraerDatosLigerosDeHtmlWatch(rawHtml);
                 if (datosHtml.titulo) tituloReal = datosHtml.titulo;
                 if (datosHtml.fecha !== '0000-00-00' && fecha === '0000-00-00') fecha = datosHtml.fecha;
-                if (datosHtml.playabilityStatus && datosHtml.playabilityStatus !== 'OK') {
+                if (datosHtml.playabilityStatus) {
                     estadoPlayability = datosHtml.playabilityStatus;
                 }
                 if (datosHtml.visitorData) visitorDataVideo = datosHtml.visitorData;
@@ -788,6 +1039,20 @@ export async function procesarVideoATxt(itemVideo) {
         subtitulos = await extraerSubtitulosViaGetTranscript(videoId, pistaUsada, transcriptParamsHtml);
     }
 
+    // CAPA 4.5 (FALLBACK EXTERNO CORS): Invidious API + Google Translate GTX cuando timedtext da 429 y get_panel/get_transcript vienen vacíos
+    if (subtitulos.length === 0 && (tuvoPistas || estadoPlayability !== 'OK')) {
+        try {
+            subtitulos = await obtenerSubtitulosViaInvidious(videoId, 'es', {
+                pistaPreferida: pistaUsada
+            });
+            if (subtitulos.length > 0) {
+                tuvoPistas = true;
+            }
+        } catch (e) {
+            if (e?.esCancelacion || cancelado) throw e;
+        }
+    }
+
     // CAPA 5 (FALLBACK DEFINITIVO): Pool de Iframes /watch Reales solo si el video tuvo pistas o requiere sesión
     if (subtitulos.length === 0 && !enMismoVideoWatch && (tuvoPistas || estadoPlayability !== 'OK')) {
         const resWorker = await extraerMedianteIframeWatchReal(videoId);
@@ -806,7 +1071,10 @@ export async function procesarVideoATxt(itemVideo) {
                 if (resWorker.rawTranscriptJson) {
                     try {
                         const parsedTr = JSON.parse(resWorker.rawTranscriptJson);
-                        subtitulos = parsearRespuestaGetTranscript(parsedTr);
+                        subtitulos = parsearRespuestaGetPanel(parsedTr);
+                        if (subtitulos.length === 0) {
+                            subtitulos = parsearRespuestaGetTranscript(parsedTr);
+                        }
                     } catch {}
                 }
                 if (subtitulos.length === 0 && resWorker.domTranscriptCues) {

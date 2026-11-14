@@ -210,20 +210,76 @@ export function parseJson3Subtitles(jsonStr) {
 }
 
 export function parseSubtitleVTT(vttText) {
-    const cues = [];
-    String(vttText || '').replace(/\r/g, '').split(/\n\n+/).forEach(block => {
+    const raw = String(vttText || '').replace(/\r/g, '');
+    const parsedCues = [];
+
+    for (const block of raw.split(/\n\n+/)) {
         const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
-        if (!lines.length || lines[0] === 'WEBVTT') return;
+        if (!lines.length) continue;
+        if (
+            lines[0].startsWith('WEBVTT') ||
+            lines[0].startsWith('NOTE') ||
+            lines[0].startsWith('STYLE') ||
+            lines[0].startsWith('REGION')
+        ) {
+            continue;
+        }
         const timeIndex = lines.findIndex(l => l.includes('-->'));
-        if (timeIndex < 0) return;
+        if (timeIndex < 0) continue;
         const parts = lines[timeIndex].split('-->');
-        if (parts.length < 2) return;
+        if (parts.length < 2) continue;
+
         const start = parseClockTimeToSeconds(parts[0].trim());
         const end = parseClockTimeToSeconds(parts[1].trim().split(/\s+/)[0]);
         const dur = Math.max(0, end - start);
-        const text = lines.slice(timeIndex + 1).join(' ').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
-        if (text) cues.push({ start, dur, text });
-    });
+        const textLines = lines
+            .slice(timeIndex + 1)
+            .map(l => decodeHtmlEntities(l.replace(/<[^>]*>/g, '')).replace(/\s+/g, ' ').trim())
+            .filter(Boolean);
+
+        if (textLines.length) {
+            parsedCues.push({ start, end: start + dur, dur, textLines });
+        }
+    }
+
+    // YouTube ASR en WebVTT usa rolling de 2 líneas, etiquetas <c>/<hh:mm:ss.ms> y cues de transición <=50ms
+    const pareceRollingYt = /<c(?:\.[^>]+)?>|<\d{2}:\d{2}:\d{2}\.\d{3}>/.test(raw)
+        || /^Kind:\s*captions/im.test(raw)
+        || parsedCues.some(c => c.dur > 0 && c.dur <= 0.05);
+
+    const cues = [];
+    if (!pareceRollingYt) {
+        for (const c of parsedCues) {
+            const text = c.textLines.join(' ').replace(/\s+/g, ' ').trim();
+            if (!text) continue;
+            const prev = cues[cues.length - 1];
+            if (prev && prev.text === text && Math.abs(c.start - prev.start) < 0.2) continue;
+            cues.push({ start: c.start, dur: c.dur, text });
+        }
+        return toSubtitles(cues);
+    }
+
+    let prevLine = '';
+    let prevEnd = 0;
+    for (const c of parsedCues) {
+        const isTinyFlush = c.dur <= 0.05;
+        const picked = [];
+        for (const line of c.textLines) {
+            if (!line) continue;
+            const esArrastre = line === prevLine && (c.textLines.length > 1 || isTinyFlush || Math.abs(c.start - prevEnd) < 0.25);
+            if (esArrastre) continue;
+            const lastOut = cues[cues.length - 1];
+            if (lastOut && lastOut.text === line && Math.abs(c.start - lastOut.start) < 1.5) continue;
+            if (isTinyFlush && lastOut && lastOut.text.endsWith(line)) continue;
+            picked.push(line);
+        }
+        const lastLine = c.textLines[c.textLines.length - 1];
+        if (lastLine) prevLine = lastLine;
+        prevEnd = c.end;
+
+        const text = picked.join(' ').replace(/\s+/g, ' ').trim();
+        if (text) cues.push({ start: c.start, dur: c.dur, text });
+    }
     return toSubtitles(cues);
 }
 

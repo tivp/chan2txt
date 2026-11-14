@@ -105,7 +105,7 @@ if (esIframeTrabajador) {
                 });
                 if (resPanel.ok) {
                     const jsonPanel = await resPanel.text();
-                    if (jsonPanel && (jsonPanel.includes('transcriptSegment') || jsonPanel.includes('macroMarkersPanelItem'))) {
+                    if (jsonPanel && (jsonPanel.includes('transcriptSegment') || jsonPanel.includes('transcriptCue'))) {
                         window.parent.postMessage({
                             type: 'MAXIMUS_WORKER_DONE',
                             videoId: workerVideoId,
@@ -132,7 +132,7 @@ if (esIframeTrabajador) {
                 });
                 if (resTr.ok) {
                     const jsonTr = await resTr.text();
-                    if (jsonTr && (jsonTr.includes('transcriptSegment') || jsonTr.includes('macroMarkersPanelItem'))) {
+                    if (jsonTr && (jsonTr.includes('transcriptSegment') || jsonTr.includes('transcriptCue'))) {
                         window.parent.postMessage({
                             type: 'MAXIMUS_WORKER_DONE',
                             videoId: workerVideoId,

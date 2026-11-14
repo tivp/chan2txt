@@ -67,7 +67,7 @@ export function _rememberSubtitleBody(rawUrl, bodyText) {
             }
         } else if (rawUrl.includes('/youtubei/v1/get_transcript') || rawUrl.includes('/youtubei/v1/get_panel')) {
             const vidActual = new URLSearchParams(location.search).get('v') || '';
-            if (vidActual && (bodyText.includes('transcriptSegment') || bodyText.includes('macroMarkersPanelItem'))) {
+            if (vidActual && (bodyText.includes('transcriptSegment') || bodyText.includes('transcriptCue'))) {
                 guardarEnMapaConLimite(_transcriptJsonPorVideoId, vidActual, bodyText, 50);
                 if (esIframeTrabajador && window.parent && window.parent !== window) {
                     try {
