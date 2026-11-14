@@ -20,6 +20,7 @@ import {
     fetchTexto
 } from './http.js';
 import {
+    generarCandidatosSubtitulos,
     generarParamsProtobufGetTranscript,
     decodeSubtitles,
     construirBloquesSubtitulos,
@@ -129,7 +130,7 @@ export async function obtenerDatosViaInnertubeNext(videoId) {
             return Array.from(new Set(params));
         }
     } catch (e) {
-        if (e.esCancelacion || cancelado) throw e;
+        if (cancelado) throw e;
     }
     return [];
 }
@@ -178,31 +179,40 @@ export async function obtenerPlayerMultiCliente(videoId, visitorDataOverride = '
                     const auth = await calcularSapisidHash('https://www.youtube.com');
                     if (auth) hFinal['Authorization'] = auth;
                 }
-                const resp = await peticionHttpBaja(urlPlayer, {
-                    method: 'POST',
-                    headers: hFinal,
-                    body: JSON.stringify(payload),
-                    anonymous: modoAnonimo,
-                    timeout: 8000
-                });
-
-                if (resp.status === 200 && resp.text) {
-                    const pr = JSON.parse(resp.text);
-                    const pistas = extraerPistasDePlayerResponse(pr);
-                    if (pistas.length > 0) {
-                        return {
-                            cliente: cli.nombre,
-                            pr,
-                            pistas,
-                            titulo: texto(pr?.videoDetails?.title || ''),
-                            fecha: extraerFechaPublicacion(pr),
-                            playabilityStatus: pr?.playabilityStatus?.status || 'OK'
-                        };
+                for (const preferirFetch of [true, false]) {
+                    try {
+                        const resp = await peticionHttpBaja(urlPlayer, {
+                            method: 'POST',
+                            preferirFetch,
+                            headers: hFinal,
+                            body: JSON.stringify(payload),
+                            anonymous: modoAnonimo,
+                            timeout: 8000
+                        });
+                        if (resp.status === 200 && resp.text) {
+                            const pr = JSON.parse(resp.text);
+                            const pistas = extraerPistasDePlayerResponse(pr);
+                            if (pistas.length > 0) {
+                                return {
+                                    cliente: cli.nombre,
+                                    pr,
+                                    pistas,
+                                    titulo: texto(pr?.videoDetails?.title || ''),
+                                    fecha: extraerFechaPublicacion(pr),
+                                    playabilityStatus: pr?.playabilityStatus?.status || 'OK'
+                                };
+                            }
+                            if (typeof window !== 'undefined' && window.__chan2txtGmPolyfillReady) {
+                                break;
+                            }
+                        }
+                    } catch (eCli) {
+                        if (cancelado) throw eCli;
                     }
                 }
             }
         } catch (e) {
-            if (e.esCancelacion || cancelado) throw e;
+            if (cancelado) throw e;
         }
     }
     return null;
@@ -253,7 +263,7 @@ export async function extraerSubtitulosViaGetTranscript(videoId, pistaElegida = 
                 }
             }
         } catch (e) {
-            if (e.esCancelacion || cancelado) throw e;
+            if (cancelado) throw e;
         }
     }
 
@@ -298,7 +308,7 @@ export async function obtenerSubtitulosRobusto(pistaElegida, videoId, idiomaPref
                     }
                 }
             } catch (e) {
-                if (e.esCancelacion || cancelado) throw e;
+                if (cancelado) throw e;
             }
         }
     }
@@ -477,7 +487,7 @@ export async function procesarVideoATxt(itemVideo) {
             }
             transcriptParamsHtml = Array.from(new Set(transcriptParamsHtml));
         } catch (e) {
-            if (e.esCancelacion || cancelado) throw e;
+            if (cancelado) throw e;
         }
     }
 

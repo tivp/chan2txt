@@ -574,7 +574,7 @@ export async function ejecutarDescargaCanal(pc) {
 
                     pc.log.push(`[OK] ${rutaFinal} (${resTxt.idioma} · ${kb} KB)`);
                 } catch (e) {
-                    if (e.esCancelacion || cancelado) break;
+                    if (cancelado) break;
 
                     if (e.noTieneSubtitulos) {
                         sinSubtitulos++;

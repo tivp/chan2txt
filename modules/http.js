@@ -229,6 +229,21 @@ export function obtenerGmTransporte() {
     return null;
 }
 
+export function esUrlMismoOrigenYoutube(url) {
+    try {
+        if (typeof location !== 'undefined' && /^https?:$/i.test(location.protocol)) {
+            const parsed = new URL(url, location.href);
+            return (
+                parsed.origin === location.origin &&
+                /^https:\/\/(?:www|m)\.youtube\.com$/i.test(parsed.origin)
+            );
+        }
+        return /^https:\/\/(?:www|m)\.youtube\.com(?:\/|$)/i.test(String(url || ''));
+    } catch {
+        return false;
+    }
+}
+
 export function peticionHttpBaja(url, opciones = {}) {
     verificarCancelacion();
 
@@ -241,8 +256,17 @@ export function peticionHttpBaja(url, opciones = {}) {
     const data = opciones.body || opciones.data || undefined;
     const anonymous = Boolean(opciones.anonymous);
     const gm = obtenerGmTransporte();
+    const preferirFetch =
+        opciones.preferirFetch !== undefined
+            ? Boolean(opciones.preferirFetch)
+            : Boolean(
+                  !opciones.forzarGm &&
+                      typeof window !== 'undefined' &&
+                      window.__chan2txtGmPolyfillReady &&
+                      esUrlMismoOrigenYoutube(url)
+              );
 
-    if (gm && !opciones.preferirFetch) {
+    if (gm && !preferirFetch) {
         return new Promise((resolve, reject) => {
             if (cancelado) {
                 const err = new Error('Descarga detenida por el usuario');
@@ -321,14 +345,25 @@ export function peticionHttpBaja(url, opciones = {}) {
             return reject(new Error('No hay transporte HTTP disponible'));
         }
 
+        let porTimeout = false;
         const ctrl = new AbortController();
         const abortar = () => ctrl.abort();
         abortadoresActivos.add(abortar);
-        const timer = setTimeout(() => ctrl.abort(), opciones.timeout || CFG.TIMEOUT);
+        const timer = setTimeout(() => {
+            porTimeout = true;
+            ctrl.abort();
+        }, opciones.timeout || CFG.TIMEOUT);
+
+        const headersFetch = {};
+        for (const [k, v] of Object.entries(headers)) {
+            if (!/^(?:user-agent|origin|referer|host)$/i.test(k)) {
+                headersFetch[k] = v;
+            }
+        }
 
         fetchFn.call(win, url, {
             method,
-            headers,
+            headers: headersFetch,
             body: data,
             credentials: anonymous ? 'omit' : 'include',
             cache: 'no-store',
@@ -344,10 +379,13 @@ export function peticionHttpBaja(url, opciones = {}) {
         })
         .then(resolve)
         .catch(e => {
-            if (cancelado || ctrl.signal.aborted) {
+            if (cancelado || (ctrl.signal.aborted && !porTimeout)) {
                 const err = new Error('Descarga detenida por el usuario');
                 err.esCancelacion = true;
                 return reject(err);
+            }
+            if (porTimeout) {
+                return reject(new Error('Tiempo agotado'));
             }
             reject(e);
         })
