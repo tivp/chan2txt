@@ -65,7 +65,7 @@ export function _rememberSubtitleBody(rawUrl, bodyText) {
                     } catch {}
                 }
             }
-        } else if (rawUrl.includes('/youtubei/v1/get_transcript')) {
+        } else if (rawUrl.includes('/youtubei/v1/get_transcript') || rawUrl.includes('/youtubei/v1/get_panel')) {
             const vidActual = new URLSearchParams(location.search).get('v') || '';
             if (vidActual && (bodyText.includes('transcriptSegment') || bodyText.includes('macroMarkersPanelItem'))) {
                 guardarEnMapaConLimite(_transcriptJsonPorVideoId, vidActual, bodyText, 50);
@@ -93,7 +93,7 @@ export function _installPotHooksOnce() {
             win.fetch = function (...args) {
                 try {
                     const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
-                    if (url && typeof url === 'string' && (url.includes('/api/timedtext') || url.includes('/youtubei/v1/get_transcript'))) {
+                    if (url && typeof url === 'string' && (url.includes('/api/timedtext') || url.includes('/youtubei/v1/get_transcript') || url.includes('/youtubei/v1/get_panel'))) {
                         if (url.includes('/api/timedtext')) _rememberPotFromTimedtextUrl(url);
                         const p = origFetch.apply(this, args);
                         p.then(res => {
@@ -113,7 +113,7 @@ export function _installPotHooksOnce() {
             xhrProto.open = function (...args) {
                 try {
                     const url = args[1];
-                    if (url && typeof url === 'string' && (url.includes('/api/timedtext') || url.includes('/youtubei/v1/get_transcript'))) {
+                    if (url && typeof url === 'string' && (url.includes('/api/timedtext') || url.includes('/youtubei/v1/get_transcript') || url.includes('/youtubei/v1/get_panel'))) {
                         if (url.includes('/api/timedtext')) _rememberPotFromTimedtextUrl(url);
                         this.addEventListener('loadend', function () {
                             try {

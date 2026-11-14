@@ -17,23 +17,36 @@ import {
     construirHeadersInnerTube,
     obtenerConfigYtcfg,
     esRespuestaCaptcha,
-    activarPausaPorCaptcha,
-    esperarResolucionCaptcha,
     peticionHttpBaja,
     fetchTexto
 } from './http.js';
 import {
     generarCandidatosSubtitulos,
     generarParamsProtobufGetTranscript,
+    generarParamsProtobufGetPanel,
     decodeSubtitles,
     construirBloquesSubtitulos,
     construirArchivoTxt,
     elegirPistaSubtitulo,
     parsearPayloadSubtitulo,
     parsearRespuestaGetTranscript,
+    parsearRespuestaGetPanel,
     convertirDomCuesASubtitulos
 } from './subtitles.js';
 import { cancelado, verificarCancelacion } from './main.js';
+
+let _timedtextBloqueadoHasta = 0;
+
+export function esTimedtextBloqueado() {
+    return Date.now() < _timedtextBloqueadoHasta;
+}
+
+export function marcarTimedtextBloqueado(ms = 90000) {
+    const hasta = Date.now() + ms;
+    if (hasta > _timedtextBloqueadoHasta) {
+        _timedtextBloqueadoHasta = hasta;
+    }
+}
 
 export function extraerDatosLigerosDeHtmlWatch(html) {
     if (!html || typeof html !== 'string') {
@@ -353,6 +366,77 @@ export async function extraerSubtitulosViaGetTranscript(videoId, pistaElegida = 
     return [];
 }
 
+// Obtiene transcripcion completa sin pasar por /api/timedtext usando PAmodern_transcript_view
+export async function obtenerSubtitulosViaGetPanel(videoId, idiomaPreferido = 'es') {
+    verificarCancelacion();
+
+    if (_transcriptJsonPorVideoId.has(videoId)) {
+        try {
+            const subCache = parsearRespuestaGetPanel(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
+            if (subCache.length > 0) return subCache;
+        } catch {}
+    }
+
+    const paramsPanel = generarParamsProtobufGetPanel(videoId);
+    if (!paramsPanel) return [];
+
+    const { headers, cfg } = await construirHeadersInnerTube(true);
+    const urlEndpoint = `https://www.youtube.com/youtubei/v1/get_panel?prettyPrint=false${cfg.apiKey ? `&key=${encodeURIComponent(cfg.apiKey)}` : ''}`;
+
+    const clientVersion = cfg.clientVersion || '2.20260401.01.00';
+    const hl = cfg.hl || idiomaPreferido || 'es';
+    const gl = cfg.gl || 'ES';
+
+    const ctxWebLimpio = {
+        client: {
+            clientName: 'WEB',
+            clientVersion,
+            hl,
+            gl,
+            ...(cfg.visitorData ? { visitorData: cfg.visitorData } : {})
+        }
+    };
+    const contextPayload = cfg.fullContext?.client?.clientName === 'WEB' ? cfg.fullContext : ctxWebLimpio;
+
+    const intentarPanel = async (contexto, hdrs, anonymous = false) => {
+        const resp = await peticionHttpBaja(urlEndpoint, {
+            method: 'POST',
+            preferirFetch: true,
+            anonymous,
+            headers: hdrs,
+            body: JSON.stringify({
+                context: contexto,
+                panelId: 'PAmodern_transcript_view',
+                params: paramsPanel
+            }),
+            timeout: 7000
+        });
+        if (resp.status === 200 && resp.text) {
+            const data = JSON.parse(resp.text);
+            return { status: 200, subs: parsearRespuestaGetPanel(data) };
+        }
+        return { status: resp.status, subs: [] };
+    };
+
+    try {
+        const res1 = await intentarPanel(contextPayload, headers, false);
+        if (res1.subs.length > 0) return res1.subs;
+        if (res1.status === 400 || res1.status === 401 || res1.status === 403) {
+            const hdrsMin = {
+                'Content-Type': 'application/json',
+                'X-YouTube-Client-Name': '1',
+                'X-YouTube-Client-Version': clientVersion
+            };
+            const res2 = await intentarPanel(ctxWebLimpio, hdrsMin, true);
+            if (res2.subs.length > 0) return res2.subs;
+        }
+    } catch (e) {
+        if (e?.esCancelacion || cancelado) throw e;
+    }
+
+    return [];
+}
+
 export async function obtenerSubtitulosRobusto(pistaElegida, videoId, idiomaPreferido = 'es') {
     const codigoIdioma = pistaElegida?.languageCode || idiomaPreferido;
     const esAuto = pistaElegida?.kind === 'asr';
@@ -363,6 +447,10 @@ export async function obtenerSubtitulosRobusto(pistaElegida, videoId, idiomaPref
         if (cuesCache && cuesCache.length > 0) {
             return decodeSubtitles(cuesCache).filter(s => s.text.length > 0);
         }
+    }
+
+    if (esTimedtextBloqueado()) {
+        return [];
     }
 
     const candidatos = generarCandidatosSubtitulos(
@@ -379,30 +467,19 @@ export async function obtenerSubtitulosRobusto(pistaElegida, videoId, idiomaPref
 
         for (const preferirFetch of vias) {
             try {
-                let res = await peticionHttpBaja(candUrl, {
+                const res = await peticionHttpBaja(candUrl, {
                     method: 'GET',
                     preferirFetch,
                     timeout: 5500
                 });
 
-                if (res.status === 429 || esRespuestaCaptcha(res.status, res.text, res.finalUrl)) {
-                    await dormir(2500 + Math.random() * 1500);
-                    verificarCancelacion();
-                    res = await peticionHttpBaja(candUrl, {
-                        method: 'GET',
-                        preferirFetch,
-                        timeout: 5500
-                    });
-                    if (res.status === 429 || esRespuestaCaptcha(res.status, res.text, res.finalUrl)) {
-                        activarPausaPorCaptcha(res.finalUrl || candUrl);
-                        await esperarResolucionCaptcha();
-                        verificarCancelacion();
-                        res = await peticionHttpBaja(candUrl, {
-                            method: 'GET',
-                            preferirFetch,
-                            timeout: 5500
-                        });
-                    }
+                if (
+                    res.status === 429 ||
+                    String(res.finalUrl || '').toLowerCase().includes('/sorry') ||
+                    esRespuestaCaptcha(res.status, res.text, res.finalUrl)
+                ) {
+                    marcarTimedtextBloqueado(90000);
+                    return [];
                 }
 
                 if (res.status === 200 && res.text) {
@@ -429,9 +506,9 @@ export async function activarSubtitulosEnPlayerActivoDom(videoId) {
             return [];
         }
 
-        // 1. Revisar si ya está en caché de get_transcript o timedtext
+        // 1. Revisar si ya está en caché de get_transcript, get_panel o timedtext
         if (_transcriptJsonPorVideoId.has(videoId)) {
-            const sub = parsearRespuestaGetTranscript(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
+            const sub = parsearRespuestaGetPanel(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
             if (sub.length > 0) return sub;
         }
         if (_subtitulosCachePorVideoId.has(videoId)) {
@@ -451,8 +528,11 @@ export async function activarSubtitulosEnPlayerActivoDom(videoId) {
             }
         }
 
+        const btnExpand = document.querySelector('#description-inline-expander #expand, ytd-text-inline-expander #expand');
+        if (btnExpand) btnExpand.click();
+
         const btnTranscriptDom = document.querySelector(
-            'ytd-video-description-transcript-section-renderer button, button[aria-label*="transcripci" i], button[aria-label*="transcript" i]'
+            'ytd-video-description-transcript-section-renderer button, button[aria-label*="Mostrar transcripci" i], button[aria-label*="Show transcript" i], button[aria-label*="transcripci" i], button[aria-label*="transcript" i]'
         );
         if (btnTranscriptDom) {
             btnTranscriptDom.click();
@@ -461,7 +541,7 @@ export async function activarSubtitulosEnPlayerActivoDom(videoId) {
         const inicio = Date.now();
         while (Date.now() - inicio < 3200) {
             if (_transcriptJsonPorVideoId.has(videoId)) {
-                const sub = parsearRespuestaGetTranscript(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
+                const sub = parsearRespuestaGetPanel(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
                 if (sub.length > 0) return sub;
             }
             if (_subtitulosCachePorVideoId.has(videoId)) {
@@ -474,8 +554,8 @@ export async function activarSubtitulosEnPlayerActivoDom(videoId) {
             if (segsDom.length > 0) {
                 const domCues = [];
                 segsDom.forEach(nodo => {
-                    const tTxt = nodo.querySelector('.segment-timestamp, [class*="timestamp"]')?.textContent?.trim() || '0:00';
-                    const bTxt = nodo.querySelector('.segment-text, yt-formatted-string, [class*="segment-text"]')?.textContent?.trim() || '';
+                    const tTxt = nodo.querySelector('.segment-timestamp, .ytwTranscriptSegmentViewModelTimestamp, [class*="Timestamp"], [class*="timestamp"]')?.textContent?.trim() || '0:00';
+                    const bTxt = nodo.querySelector('.segment-text, yt-formatted-string, span[role="text"], .yt-core-attributed-string, [class*="segment-text"]')?.textContent?.trim() || '';
                     if (bTxt) domCues.push({ tTxt, bTxt });
                 });
                 const convertidos = convertirDomCuesASubtitulos(domCues);
@@ -527,6 +607,7 @@ export async function procesarVideoATxt(itemVideo) {
     let estadoPlayability = 'OK';
     let transcriptParamsHtml = [];
     let visitorDataVideo = '';
+    let vinoDePanelModerno = false;
 
     const enMismoVideoWatch =
         location.pathname.includes('/watch') &&
@@ -558,23 +639,31 @@ export async function procesarVideoATxt(itemVideo) {
                     }
                 }
             }
-            if (_subtitulosCachePorVideoId.has(videoId) && pistaUsada) {
+            if (_transcriptJsonPorVideoId.has(videoId)) {
+                const subCache = parsearRespuestaGetPanel(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
+                if (subCache.length > 0) {
+                    subtitulos = subCache;
+                    vinoDePanelModerno = true;
+                    tuvoPistas = true;
+                }
+            }
+            if (subtitulos.length === 0 && _subtitulosCachePorVideoId.has(videoId) && pistaUsada) {
                 subtitulos = await obtenerSubtitulosRobusto(pistaUsada, videoId, 'es');
             }
         } catch {}
     }
 
-    // CAPA 1 HÍBRIDA (Paralelo ANDROID/IOS + WEB Player JSON ~169ms):
-    // Evita bajar 900 KB de HTML /watch y get_transcript lento para el 95%+ de videos con pistas limpias.
+    // CAPA 1 HÍBRIDA (Paralelo get_panel PAmodern_transcript_view + WEB Player JSON ~120ms, 0 hits a /api/timedtext):
+    // Resuelve videos, Shorts y Lives sin detonar los HTTP 429 de /api/timedtext; usa ANDROID/IOS/MWEB solo si hace falta.
     if (subtitulos.length === 0 || fecha === '0000-00-00') {
         try {
-            const [infoMovil, infoWeb] = await Promise.all([
+            const [subsPanel, infoWeb] = await Promise.all([
                 subtitulos.length === 0
-                    ? obtenerPlayerMultiCliente(videoId, visitorDataVideo).catch(e => {
+                    ? obtenerSubtitulosViaGetPanel(videoId, 'es').catch(e => {
                           if (e?.esCancelacion || cancelado) throw e;
-                          return null;
+                          return [];
                       })
-                    : Promise.resolve(null),
+                    : Promise.resolve([]),
                 obtenerPlayerWebLigero(videoId).catch(e => {
                     if (e?.esCancelacion || cancelado) throw e;
                     return null;
@@ -582,32 +671,49 @@ export async function procesarVideoATxt(itemVideo) {
             ]);
 
             if (infoWeb?.titulo) tituloReal = infoWeb.titulo;
-            else if (infoMovil?.titulo && (!tituloReal || tituloReal === videoId)) tituloReal = infoMovil.titulo;
-
             if (infoWeb?.fecha && infoWeb.fecha !== '0000-00-00') fecha = infoWeb.fecha;
-            else if (infoMovil?.fecha && infoMovil.fecha !== '0000-00-00' && fecha === '0000-00-00') fecha = infoMovil.fecha;
-
             if (infoWeb?.playabilityStatus && infoWeb.playabilityStatus !== 'OK') {
                 estadoPlayability = infoWeb.playabilityStatus;
-            } else if (infoMovil?.playabilityStatus && infoMovil.playabilityStatus !== 'OK') {
-                estadoPlayability = infoMovil.playabilityStatus;
             }
-
             if (!visitorDataVideo && infoWeb?.visitorData) {
                 visitorDataVideo = infoWeb.visitorData;
             }
-
-            if (subtitulos.length === 0 && infoMovil?.pistas?.length > 0) {
-                tuvoPistas = true;
-                const pistaMovil = elegirPistaSubtitulo(infoMovil.pistas);
-                if (pistaMovil) {
-                    pistaUsada = pistaMovil;
-                    subtitulos = await obtenerSubtitulosRobusto(pistaMovil, videoId, 'es');
-                }
-            } else if (infoWeb?.pistas?.length > 0) {
+            if (infoWeb?.pistas?.length > 0) {
                 tuvoPistas = true;
                 if (!pistaUsada) {
                     pistaUsada = elegirPistaSubtitulo(infoWeb.pistas);
+                }
+            }
+
+            if (subsPanel.length > 0) {
+                subtitulos = subsPanel;
+                tuvoPistas = true;
+                vinoDePanelModerno = true;
+            }
+
+            if (subtitulos.length === 0) {
+                const infoMovil = await obtenerPlayerMultiCliente(videoId, visitorDataVideo).catch(e => {
+                    if (e?.esCancelacion || cancelado) throw e;
+                    return null;
+                });
+
+                if (infoMovil?.titulo && (!tituloReal || tituloReal === videoId)) tituloReal = infoMovil.titulo;
+                if (infoMovil?.fecha && infoMovil.fecha !== '0000-00-00' && fecha === '0000-00-00') {
+                    fecha = infoMovil.fecha;
+                }
+                if (infoMovil?.playabilityStatus && infoMovil.playabilityStatus !== 'OK' && estadoPlayability === 'OK') {
+                    estadoPlayability = infoMovil.playabilityStatus;
+                }
+
+                if (infoMovil?.pistas?.length > 0) {
+                    tuvoPistas = true;
+                    const pistaMovil = elegirPistaSubtitulo(infoMovil.pistas);
+                    if (pistaMovil) {
+                        pistaUsada = pistaMovil;
+                        if (!esTimedtextBloqueado() || _subtitulosCachePorVideoId.has(videoId)) {
+                            subtitulos = await obtenerSubtitulosRobusto(pistaMovil, videoId, 'es');
+                        }
+                    }
                 }
             }
         } catch (e) {
@@ -669,7 +775,7 @@ export async function procesarVideoATxt(itemVideo) {
         }
     }
 
-    if (subtitulos.length === 0 && pistaUsada?.baseUrl) {
+    if (subtitulos.length === 0 && pistaUsada?.baseUrl && (!esTimedtextBloqueado() || _subtitulosCachePorVideoId.has(videoId))) {
         subtitulos = await obtenerSubtitulosRobusto(pistaUsada, videoId, 'es');
     }
 
@@ -748,7 +854,7 @@ export async function procesarVideoATxt(itemVideo) {
     const idiomaEtiqueta =
         (pistaUsada?.languageCode || 'es') +
         (pistaUsada?.kind === 'asr' ? ' auto' : '') +
-        (pistaUsada?.necesitaTraducir ? ' -> es' : '');
+        (pistaUsada?.necesitaTraducir && !vinoDePanelModerno ? ' -> es' : '');
 
     return {
         fecha,

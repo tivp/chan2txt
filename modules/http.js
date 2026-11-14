@@ -2,9 +2,10 @@ import { win, CFG, abortadoresActivos } from './config.js';
 import { panelCanal, cancelado, verificarCancelacion } from './main.js';
 
 export let enPausaPorCaptcha = false;
-let resolverCaptchaFn = null;
+const resolversCaptcha = new Set();
 export let urlCaptchaActivo = '';
 let timerAutoVerificacionCaptcha = null;
+let ultimaNotificacionCaptchaMs = 0;
 
 // ==================================================
 // AUTENTICACIÓN SAPISIDHASH Y HEADERS NATIVOS INNERTUBE DE YOUTUBE
@@ -131,35 +132,40 @@ export function enviarNotificacion(titulo, cuerpo, urlAbrir) {
 // ==================================================
 
 export function esRespuestaCaptcha(status, textoResp, finalUrl) {
-    if (status === 429) return true;
     const url = String(finalUrl || '').toLowerCase();
-    if (url.includes('/sorry/index') || url.includes('google.com/sorry')) return true;
+    // /api/timedtext devuelve 429 "We're sorry" sin reCAPTCHA resoluble; cambiar de protocolo en vez de pausar
+    if (url.includes('/api/timedtext')) return false;
 
-    if (status === 403 || status === 503) {
-        const muestra = String(textoResp || '').slice(0, 4000);
-        if (
-            muestra.includes('id="captcha-form"') ||
-            muestra.includes('g-recaptcha') ||
-            muestra.includes('recaptcha/api.js') ||
-            /demuestra que no eres un robot|unusual traffic|tr[aá]fico inusual/i.test(muestra)
-        ) {
-            return true;
-        }
-    }
+    const muestra = String(textoResp || '').slice(0, 8000);
+    const tieneCaptchaInteractivo =
+        muestra.includes('id="captcha-form"') ||
+        muestra.includes('g-recaptcha') ||
+        muestra.includes('recaptcha/api.js') ||
+        /demuestra que no eres un robot|i'm not a robot/i.test(muestra);
+
+    if (tieneCaptchaInteractivo) return true;
+
     return false;
 }
 
 export function activarPausaPorCaptcha(url) {
+    const destino = String(url || 'https://www.youtube.com/');
+    if (destino.toLowerCase().includes('/api/timedtext')) return;
     if (enPausaPorCaptcha) return;
-    enPausaPorCaptcha = true;
-    urlCaptchaActivo = url || 'https://www.youtube.com/';
 
-    emitirPitidoAlerta();
-    enviarNotificacion(
-        '⚠️ YouTube a TXT: ¡Saltó el reCAPTCHA!',
-        '¡A yapo saltó el reCAPTCHA! Tomás, mira esto es tuyo: resuélvelo que te espero para continuar.',
-        urlCaptchaActivo
-    );
+    enPausaPorCaptcha = true;
+    urlCaptchaActivo = destino;
+
+    const ahora = Date.now();
+    if (ahora - ultimaNotificacionCaptchaMs >= 45000) {
+        ultimaNotificacionCaptchaMs = ahora;
+        emitirPitidoAlerta();
+        enviarNotificacion(
+            '⚠️ YouTube a TXT: ¡Saltó el reCAPTCHA!',
+            '¡A yapo saltó el reCAPTCHA! Tomás, mira esto es tuyo: resuélvelo que te espero para continuar.',
+            urlCaptchaActivo
+        );
+    }
 
     if (panelCanal) {
         panelCanal.panel.classList.add('alerta-captcha');
@@ -173,25 +179,33 @@ export function activarPausaPorCaptcha(url) {
     }
 
     clearInterval(timerAutoVerificacionCaptcha);
+    const urlProbe = urlCaptchaActivo.includes('/youtubei/')
+        ? 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+        : urlCaptchaActivo;
     timerAutoVerificacionCaptcha = setInterval(async () => {
         if (!enPausaPorCaptcha || cancelado) {
             clearInterval(timerAutoVerificacionCaptcha);
             return;
         }
         try {
-            const test = await peticionHttpBaja('https://www.youtube.com/?hl=es', { timeout: 8000 });
-            if (test.status === 200 && !esRespuestaCaptcha(test.status, test.text, test.finalUrl)) {
+            const test = await peticionHttpBaja(urlProbe, { timeout: 8000 });
+            const finalProbeUrl = String(test.finalUrl || '').toLowerCase();
+            if (
+                test.status === 200 &&
+                !finalProbeUrl.includes('/sorry') &&
+                !esRespuestaCaptcha(test.status, test.text, test.finalUrl)
+            ) {
                 clearInterval(timerAutoVerificacionCaptcha);
                 reanudarDespuesDeCaptcha();
             }
         } catch {}
-    }, 4500);
+    }, 8000);
 }
 
 export function esperarResolucionCaptcha() {
-    if (!enPausaPorCaptcha) return Promise.resolve();
+    if (!enPausaPorCaptcha || cancelado) return Promise.resolve();
     return new Promise(resolve => {
-        resolverCaptchaFn = resolve;
+        resolversCaptcha.add(resolve);
     });
 }
 
@@ -210,10 +224,10 @@ export function reanudarDespuesDeCaptcha() {
         panelCanal.estado.textContent = 'Captcha resuelto. Reanudando descargas...';
     }
 
-    if (typeof resolverCaptchaFn === 'function') {
-        const fn = resolverCaptchaFn;
-        resolverCaptchaFn = null;
-        fn();
+    const pendientes = Array.from(resolversCaptcha);
+    resolversCaptcha.clear();
+    for (const fn of pendientes) {
+        try { fn(); } catch {}
     }
 }
 
@@ -375,7 +389,7 @@ export async function peticionHttp(url, opciones = {}) {
 
     let resp = await peticionHttpBaja(url, opciones);
 
-    if (resp.status === 429) {
+    if (resp.status === 429 && !String(url || '').includes('/api/timedtext')) {
         await new Promise(r => setTimeout(r, 2500 + Math.random() * 1500));
         verificarCancelacion();
         resp = await peticionHttpBaja(url, opciones);

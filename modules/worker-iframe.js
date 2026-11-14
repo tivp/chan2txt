@@ -9,6 +9,7 @@ import {
     iframesActivosSet
 } from './config.js';
 import { _potLatestParams } from './interceptor.js';
+import { generarParamsProtobufGetPanel } from './subtitles.js';
 import { verificarCancelacion } from './main.js';
 
 // ==================================================
@@ -72,25 +73,54 @@ if (esIframeTrabajador) {
 
         let transcriptParams = buscarParamTranscriptEnObjeto(initData);
 
-        // 1. Si hay transcriptParams en ytInitialData, disparar get_transcript desde el contexto first-party del iframe
-        if (transcriptParams) {
-            try {
-                const apiKey = win.ytcfg?.get?.('INNERTUBE_API_KEY') || '';
-                const ctx = win.ytcfg?.get?.('INNERTUBE_CONTEXT') || {
-                    client: {
-                        clientName: 'WEB',
-                        clientVersion: win.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20260401.01.00',
-                        hl: 'es'
-                    }
-                };
-                const visitorData = win.ytcfg?.get?.('VISITOR_DATA') || ctx?.client?.visitorData || '';
-                const headersTr = {
-                    'Content-Type': 'application/json',
-                    'X-Youtube-Client-Name': String(win.ytcfg?.get?.('INNERTUBE_CONTEXT_CLIENT_NAME') || 1),
-                    'X-Youtube-Client-Version': String(win.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20260401.01.00')
-                };
-                if (visitorData) headersTr['X-Goog-Visitor-Id'] = visitorData;
+        // 1. Intentar get_panel (PAmodern_transcript_view) y get_transcript desde el contexto first-party del iframe
+        try {
+            const apiKey = win.ytcfg?.get?.('INNERTUBE_API_KEY') || '';
+            const ctx = win.ytcfg?.get?.('INNERTUBE_CONTEXT') || {
+                client: {
+                    clientName: 'WEB',
+                    clientVersion: win.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20260401.01.00',
+                    hl: 'es'
+                }
+            };
+            const visitorData = win.ytcfg?.get?.('VISITOR_DATA') || ctx?.client?.visitorData || '';
+            const headersTr = {
+                'Content-Type': 'application/json',
+                'X-Youtube-Client-Name': String(win.ytcfg?.get?.('INNERTUBE_CONTEXT_CLIENT_NAME') || 1),
+                'X-Youtube-Client-Version': String(win.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20260401.01.00')
+            };
+            if (visitorData) headersTr['X-Goog-Visitor-Id'] = visitorData;
 
+            const paramsPanelIframe = generarParamsProtobufGetPanel(workerVideoId);
+            if (paramsPanelIframe) {
+                const resPanel = await win.fetch(`https://www.youtube.com/youtubei/v1/get_panel?prettyPrint=false${apiKey ? `&key=${apiKey}` : ''}`, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: headersTr,
+                    body: JSON.stringify({
+                        context: ctx,
+                        panelId: 'PAmodern_transcript_view',
+                        params: paramsPanelIframe
+                    })
+                });
+                if (resPanel.ok) {
+                    const jsonPanel = await resPanel.text();
+                    if (jsonPanel && (jsonPanel.includes('transcriptSegment') || jsonPanel.includes('macroMarkersPanelItem'))) {
+                        window.parent.postMessage({
+                            type: 'MAXIMUS_WORKER_DONE',
+                            videoId: workerVideoId,
+                            noTieneSubtitulos: false,
+                            titulo,
+                            fecha,
+                            pistas,
+                            rawTranscriptJson: jsonPanel
+                        }, '*');
+                        return;
+                    }
+                }
+            }
+
+            if (transcriptParams) {
                 const resTr = await win.fetch(`https://www.youtube.com/youtubei/v1/get_transcript?prettyPrint=false${apiKey ? `&key=${apiKey}` : ''}`, {
                     method: 'POST',
                     credentials: 'include',
@@ -115,8 +145,8 @@ if (esIframeTrabajador) {
                         return;
                     }
                 }
-            } catch {}
-        }
+            }
+        } catch {}
 
         // 2. Activar subtítulos y clic en botón CC / Panel de transcripción real del DOM del iframe
         try {
@@ -136,8 +166,11 @@ if (esIframeTrabajador) {
             const btnCc = document.querySelector('.ytp-subtitles-button[aria-pressed="false"]');
             if (btnCc) btnCc.click();
 
+            const btnExpand = document.querySelector('#description-inline-expander #expand, ytd-text-inline-expander #expand');
+            if (btnExpand) btnExpand.click();
+
             const btnTranscriptDom = document.querySelector(
-                'ytd-video-description-transcript-section-renderer button, button[aria-label*="transcripci" i], button[aria-label*="transcript" i]'
+                'ytd-video-description-transcript-section-renderer button, button[aria-label*="Mostrar transcripci" i], button[aria-label*="Show transcript" i], button[aria-label*="transcripci" i], button[aria-label*="transcript" i]'
             );
             if (btnTranscriptDom) btnTranscriptDom.click();
         } catch {}
@@ -180,8 +213,8 @@ if (esIframeTrabajador) {
             if (segsDom.length > 0) {
                 const domCues = [];
                 segsDom.forEach(nodo => {
-                    const tTxt = nodo.querySelector('.segment-timestamp, [class*="timestamp"]')?.textContent?.trim() || '0:00';
-                    const bTxt = nodo.querySelector('.segment-text, yt-formatted-string, [class*="segment-text"]')?.textContent?.trim() || '';
+                    const tTxt = nodo.querySelector('.segment-timestamp, .ytwTranscriptSegmentViewModelTimestamp, [class*="Timestamp"], [class*="timestamp"]')?.textContent?.trim() || '0:00';
+                    const bTxt = nodo.querySelector('.segment-text, yt-formatted-string, span[role="text"], .yt-core-attributed-string, [class*="segment-text"]')?.textContent?.trim() || '';
                     if (bTxt) domCues.push({ tTxt, bTxt });
                 });
                 if (domCues.length > 0) {

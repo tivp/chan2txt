@@ -177,7 +177,7 @@
                         } catch {}
                     }
                 }
-            } else if (rawUrl.includes('/youtubei/v1/get_transcript')) {
+            } else if (rawUrl.includes('/youtubei/v1/get_transcript') || rawUrl.includes('/youtubei/v1/get_panel')) {
                 const vidActual = new URLSearchParams(location.search).get('v') || '';
                 if (vidActual && (bodyText.includes('transcriptSegment') || bodyText.includes('macroMarkersPanelItem'))) {
                     guardarEnMapaConLimite(_transcriptJsonPorVideoId, vidActual, bodyText, 50);
@@ -204,7 +204,7 @@
                 win.fetch = function (...args) {
                     try {
                         const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
-                        if (url && typeof url === 'string' && (url.includes('/api/timedtext') || url.includes('/youtubei/v1/get_transcript'))) {
+                        if (url && typeof url === 'string' && (url.includes('/api/timedtext') || url.includes('/youtubei/v1/get_transcript') || url.includes('/youtubei/v1/get_panel'))) {
                             if (url.includes('/api/timedtext')) _rememberPotFromTimedtextUrl(url);
                             const p = origFetch.apply(this, args);
                             p.then(res => {
@@ -224,7 +224,7 @@
                 xhrProto.open = function (...args) {
                     try {
                         const url = args[1];
-                        if (url && typeof url === 'string' && (url.includes('/api/timedtext') || url.includes('/youtubei/v1/get_transcript'))) {
+                        if (url && typeof url === 'string' && (url.includes('/api/timedtext') || url.includes('/youtubei/v1/get_transcript') || url.includes('/youtubei/v1/get_panel'))) {
                             if (url.includes('/api/timedtext')) _rememberPotFromTimedtextUrl(url);
                             this.addEventListener('loadend', function () {
                                 try {
@@ -304,25 +304,54 @@
 
             let transcriptParams = buscarParamTranscriptEnObjeto(initData);
 
-            // 1. Si hay transcriptParams en ytInitialData, disparar get_transcript desde el contexto first-party del iframe
-            if (transcriptParams) {
-                try {
-                    const apiKey = win.ytcfg?.get?.('INNERTUBE_API_KEY') || '';
-                    const ctx = win.ytcfg?.get?.('INNERTUBE_CONTEXT') || {
-                        client: {
-                            clientName: 'WEB',
-                            clientVersion: win.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20260401.01.00',
-                            hl: 'es'
-                        }
-                    };
-                    const visitorData = win.ytcfg?.get?.('VISITOR_DATA') || ctx?.client?.visitorData || '';
-                    const headersTr = {
-                        'Content-Type': 'application/json',
-                        'X-Youtube-Client-Name': String(win.ytcfg?.get?.('INNERTUBE_CONTEXT_CLIENT_NAME') || 1),
-                        'X-Youtube-Client-Version': String(win.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20260401.01.00')
-                    };
-                    if (visitorData) headersTr['X-Goog-Visitor-Id'] = visitorData;
+            // 1. Intentar get_panel (PAmodern_transcript_view) y get_transcript desde el contexto first-party del iframe
+            try {
+                const apiKey = win.ytcfg?.get?.('INNERTUBE_API_KEY') || '';
+                const ctx = win.ytcfg?.get?.('INNERTUBE_CONTEXT') || {
+                    client: {
+                        clientName: 'WEB',
+                        clientVersion: win.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20260401.01.00',
+                        hl: 'es'
+                    }
+                };
+                const visitorData = win.ytcfg?.get?.('VISITOR_DATA') || ctx?.client?.visitorData || '';
+                const headersTr = {
+                    'Content-Type': 'application/json',
+                    'X-Youtube-Client-Name': String(win.ytcfg?.get?.('INNERTUBE_CONTEXT_CLIENT_NAME') || 1),
+                    'X-Youtube-Client-Version': String(win.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20260401.01.00')
+                };
+                if (visitorData) headersTr['X-Goog-Visitor-Id'] = visitorData;
 
+                const paramsPanelIframe = generarParamsProtobufGetPanel(workerVideoId);
+                if (paramsPanelIframe) {
+                    const resPanel = await win.fetch(`https://www.youtube.com/youtubei/v1/get_panel?prettyPrint=false${apiKey ? `&key=${apiKey}` : ''}`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: headersTr,
+                        body: JSON.stringify({
+                            context: ctx,
+                            panelId: 'PAmodern_transcript_view',
+                            params: paramsPanelIframe
+                        })
+                    });
+                    if (resPanel.ok) {
+                        const jsonPanel = await resPanel.text();
+                        if (jsonPanel && (jsonPanel.includes('transcriptSegment') || jsonPanel.includes('macroMarkersPanelItem'))) {
+                            window.parent.postMessage({
+                                type: 'MAXIMUS_WORKER_DONE',
+                                videoId: workerVideoId,
+                                noTieneSubtitulos: false,
+                                titulo,
+                                fecha,
+                                pistas,
+                                rawTranscriptJson: jsonPanel
+                            }, '*');
+                            return;
+                        }
+                    }
+                }
+
+                if (transcriptParams) {
                     const resTr = await win.fetch(`https://www.youtube.com/youtubei/v1/get_transcript?prettyPrint=false${apiKey ? `&key=${apiKey}` : ''}`, {
                         method: 'POST',
                         credentials: 'include',
@@ -347,8 +376,8 @@
                             return;
                         }
                     }
-                } catch {}
-            }
+                }
+            } catch {}
 
             // 2. Activar subtítulos y clic en botón CC / Panel de transcripción real del DOM del iframe
             try {
@@ -368,8 +397,11 @@
                 const btnCc = document.querySelector('.ytp-subtitles-button[aria-pressed="false"]');
                 if (btnCc) btnCc.click();
 
+                const btnExpand = document.querySelector('#description-inline-expander #expand, ytd-text-inline-expander #expand');
+                if (btnExpand) btnExpand.click();
+
                 const btnTranscriptDom = document.querySelector(
-                    'ytd-video-description-transcript-section-renderer button, button[aria-label*="transcripci" i], button[aria-label*="transcript" i]'
+                    'ytd-video-description-transcript-section-renderer button, button[aria-label*="Mostrar transcripci" i], button[aria-label*="Show transcript" i], button[aria-label*="transcripci" i], button[aria-label*="transcript" i]'
                 );
                 if (btnTranscriptDom) btnTranscriptDom.click();
             } catch {}
@@ -412,8 +444,8 @@
                 if (segsDom.length > 0) {
                     const domCues = [];
                     segsDom.forEach(nodo => {
-                        const tTxt = nodo.querySelector('.segment-timestamp, [class*="timestamp"]')?.textContent?.trim() || '0:00';
-                        const bTxt = nodo.querySelector('.segment-text, yt-formatted-string, [class*="segment-text"]')?.textContent?.trim() || '';
+                        const tTxt = nodo.querySelector('.segment-timestamp, .ytwTranscriptSegmentViewModelTimestamp, [class*="Timestamp"], [class*="timestamp"]')?.textContent?.trim() || '0:00';
+                        const bTxt = nodo.querySelector('.segment-text, yt-formatted-string, span[role="text"], .yt-core-attributed-string, [class*="segment-text"]')?.textContent?.trim() || '';
                         if (bTxt) domCues.push({ tTxt, bTxt });
                     });
                     if (domCues.length > 0) {
@@ -536,9 +568,10 @@
     let iframesEnCurso = 0;
 
     let enPausaPorCaptcha = false;
-    let resolverCaptchaFn = null;
+    const resolversCaptcha = new Set();
     let urlCaptchaActivo = '';
     let timerAutoVerificacionCaptcha = null;
+    let ultimaNotificacionCaptchaMs = 0;
 
     window.addEventListener('message', ev => {
         try {
@@ -810,6 +843,27 @@
         candidatos.push(bytesToBase64(outerDefault));
 
         return Array.from(new Set(candidatos));
+    }
+
+    // Genera params Base64 del panel moderno de transcripcion (PAmodern_transcript_view)
+    function generarParamsProtobufGetPanel(videoId) {
+        if (!videoId) return '';
+        const idBytes = Array.from(new TextEncoder().encode(String(videoId).trim()));
+        const pushVarint = (arr, n) => {
+            let v = n >>> 0;
+            while (v >= 0x80) {
+                arr.push((v & 0x7f) | 0x80);
+                v >>>= 7;
+            }
+            arr.push(v);
+        };
+        const inner = [0x0a];
+        pushVarint(inner, idBytes.length);
+        inner.push(...idBytes, 0x18, 0x02);
+        const outer = [0xaa, 0x09];
+        pushVarint(outer, inner.length);
+        outer.push(...inner);
+        return bytesToBase64(outer);
     }
 
     // ==================================================
@@ -1246,35 +1300,40 @@
     // ==================================================
 
     function esRespuestaCaptcha(status, textoResp, finalUrl) {
-        if (status === 429) return true;
         const url = String(finalUrl || '').toLowerCase();
-        if (url.includes('/sorry/index') || url.includes('google.com/sorry')) return true;
+        // /api/timedtext devuelve 429 "We're sorry" sin reCAPTCHA resoluble; cambiar de protocolo en vez de pausar
+        if (url.includes('/api/timedtext')) return false;
 
-        if (status === 403 || status === 503) {
-            const muestra = String(textoResp || '').slice(0, 4000);
-            if (
-                muestra.includes('id="captcha-form"') ||
-                muestra.includes('g-recaptcha') ||
-                muestra.includes('recaptcha/api.js') ||
-                /demuestra que no eres un robot|unusual traffic|tr[aá]fico inusual/i.test(muestra)
-            ) {
-                return true;
-            }
-        }
+        const muestra = String(textoResp || '').slice(0, 8000);
+        const tieneCaptchaInteractivo =
+            muestra.includes('id="captcha-form"') ||
+            muestra.includes('g-recaptcha') ||
+            muestra.includes('recaptcha/api.js') ||
+            /demuestra que no eres un robot|i'm not a robot/i.test(muestra);
+
+        if (tieneCaptchaInteractivo) return true;
+
         return false;
     }
 
     function activarPausaPorCaptcha(url) {
+        const destino = String(url || 'https://www.youtube.com/');
+        if (destino.toLowerCase().includes('/api/timedtext')) return;
         if (enPausaPorCaptcha) return;
-        enPausaPorCaptcha = true;
-        urlCaptchaActivo = url || 'https://www.youtube.com/';
 
-        emitirPitidoAlerta();
-        enviarNotificacion(
-            '⚠️ YouTube a TXT: ¡Saltó el reCAPTCHA!',
-            '¡A yapo saltó el reCAPTCHA! Tomás, mira esto es tuyo: resuélvelo que te espero para continuar.',
-            urlCaptchaActivo
-        );
+        enPausaPorCaptcha = true;
+        urlCaptchaActivo = destino;
+
+        const ahora = Date.now();
+        if (ahora - ultimaNotificacionCaptchaMs >= 45000) {
+            ultimaNotificacionCaptchaMs = ahora;
+            emitirPitidoAlerta();
+            enviarNotificacion(
+                '⚠️ YouTube a TXT: ¡Saltó el reCAPTCHA!',
+                '¡A yapo saltó el reCAPTCHA! Tomás, mira esto es tuyo: resuélvelo que te espero para continuar.',
+                urlCaptchaActivo
+            );
+        }
 
         if (panelCanal) {
             panelCanal.panel.classList.add('alerta-captcha');
@@ -1288,25 +1347,33 @@
         }
 
         clearInterval(timerAutoVerificacionCaptcha);
+        const urlProbe = urlCaptchaActivo.includes('/youtubei/')
+            ? 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+            : urlCaptchaActivo;
         timerAutoVerificacionCaptcha = setInterval(async () => {
             if (!enPausaPorCaptcha || cancelado) {
                 clearInterval(timerAutoVerificacionCaptcha);
                 return;
             }
             try {
-                const test = await peticionHttpBaja('https://www.youtube.com/?hl=es', { timeout: 8000 });
-                if (test.status === 200 && !esRespuestaCaptcha(test.status, test.text, test.finalUrl)) {
+                const test = await peticionHttpBaja(urlProbe, { timeout: 8000 });
+                const finalProbeUrl = String(test.finalUrl || '').toLowerCase();
+                if (
+                    test.status === 200 &&
+                    !finalProbeUrl.includes('/sorry') &&
+                    !esRespuestaCaptcha(test.status, test.text, test.finalUrl)
+                ) {
                     clearInterval(timerAutoVerificacionCaptcha);
                     reanudarDespuesDeCaptcha();
                 }
             } catch {}
-        }, 4500);
+        }, 8000);
     }
 
     function esperarResolucionCaptcha() {
-        if (!enPausaPorCaptcha) return Promise.resolve();
+        if (!enPausaPorCaptcha || cancelado) return Promise.resolve();
         return new Promise(resolve => {
-            resolverCaptchaFn = resolve;
+            resolversCaptcha.add(resolve);
         });
     }
 
@@ -1325,10 +1392,10 @@
             panelCanal.estado.textContent = 'Captcha resuelto. Reanudando descargas...';
         }
 
-        if (typeof resolverCaptchaFn === 'function') {
-            const fn = resolverCaptchaFn;
-            resolverCaptchaFn = null;
-            fn();
+        const pendientes = Array.from(resolversCaptcha);
+        resolversCaptcha.clear();
+        for (const fn of pendientes) {
+            try { fn(); } catch {}
         }
     }
 
@@ -1490,7 +1557,7 @@
 
         let resp = await peticionHttpBaja(url, opciones);
 
-        if (resp.status === 429) {
+        if (resp.status === 429 && !String(url || '').includes('/api/timedtext')) {
             await new Promise(r => setTimeout(r, 2500 + Math.random() * 1500));
             verificarCancelacion();
             resp = await peticionHttpBaja(url, opciones);
@@ -2158,13 +2225,17 @@
         return null;
     }
 
+    function parsearRespuestaGetPanel(data) {
+        return parsearRespuestaGetTranscript(data);
+    }
+
     function parsearRespuestaGetTranscript(data) {
         const cues = [];
 
-        const recorrer = nodo => {
+        const recorrer = (nodo, startSecPadre = null) => {
             if (!nodo || typeof nodo !== 'object') return;
             if (Array.isArray(nodo)) {
-                for (const el of nodo) recorrer(el);
+                for (const el of nodo) recorrer(el, startSecPadre);
                 return;
             }
 
@@ -2190,15 +2261,22 @@
             if (nodo.transcriptSegmentViewModel) {
                 const vm = nodo.transcriptSegmentViewModel;
                 const txt =
+                    vm.simpleText ||
                     vm.text?.content ||
                     vm.snippet?.content ||
                     vm.subtitle?.content ||
+                    (Array.isArray(vm.snippet?.runs) ? vm.snippet.runs.map(r => r?.text || '').join('') : '') ||
                     '';
-                let startSec = 0;
+                let startSec = typeof startSecPadre === 'number' && !Number.isNaN(startSecPadre)
+                    ? startSecPadre
+                    : 0;
                 if (vm.startTimeMs !== undefined) {
                     startSec = parseFloat(vm.startTimeMs) / 1000;
-                } else if (vm.timestamp?.content || vm.timestampText) {
-                    startSec = parseClockTimeToSeconds(vm.timestamp?.content || vm.timestampText);
+                } else if (startSecPadre === null || startSecPadre === undefined) {
+                    const tsRaw = typeof vm.timestamp === 'string'
+                        ? vm.timestamp
+                        : (vm.timestamp?.content || vm.timestampText || '');
+                    if (tsRaw) startSec = parseClockTimeToSeconds(tsRaw);
                 }
                 if (txt.trim()) {
                     cues.push({
@@ -2211,12 +2289,17 @@
             }
 
             if (nodo.macroMarkersPanelItemViewModel && nodo.macroMarkersPanelItemViewModel.item) {
-                recorrer(nodo.macroMarkersPanelItemViewModel.item);
+                const m = nodo.macroMarkersPanelItemViewModel;
+                const startRaw = m.onTap?.innertubeCommand?.watchEndpoint?.startTimeSeconds;
+                const startHeredado = startRaw !== undefined && startRaw !== null && !Number.isNaN(Number(startRaw))
+                    ? Number(startRaw)
+                    : startSecPadre;
+                recorrer(m.item, startHeredado);
                 return;
             }
 
             for (const v of Object.values(nodo)) {
-                if (v && typeof v === 'object') recorrer(v);
+                if (v && typeof v === 'object') recorrer(v, startSecPadre);
             }
         };
 
@@ -2300,6 +2383,90 @@
         return [];
     }
 
+    let _timedtextBloqueadoHasta = 0;
+
+    function esTimedtextBloqueado() {
+        return Date.now() < _timedtextBloqueadoHasta;
+    }
+
+    function marcarTimedtextBloqueado(ms = 90000) {
+        const hasta = Date.now() + ms;
+        if (hasta > _timedtextBloqueadoHasta) {
+            _timedtextBloqueadoHasta = hasta;
+        }
+    }
+
+    // Obtiene transcripcion completa sin pasar por /api/timedtext usando PAmodern_transcript_view
+    async function obtenerSubtitulosViaGetPanel(videoId, idiomaPreferido = 'es') {
+        verificarCancelacion();
+
+        if (_transcriptJsonPorVideoId.has(videoId)) {
+            try {
+                const subCache = parsearRespuestaGetPanel(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
+                if (subCache.length > 0) return subCache;
+            } catch {}
+        }
+
+        const paramsPanel = generarParamsProtobufGetPanel(videoId);
+        if (!paramsPanel) return [];
+
+        const { headers, cfg } = await construirHeadersInnerTube(true);
+        const urlEndpoint = `https://www.youtube.com/youtubei/v1/get_panel?prettyPrint=false${cfg.apiKey ? `&key=${encodeURIComponent(cfg.apiKey)}` : ''}`;
+
+        const clientVersion = cfg.clientVersion || '2.20260401.01.00';
+        const hl = cfg.hl || idiomaPreferido || 'es';
+        const gl = cfg.gl || 'ES';
+
+        const ctxWebLimpio = {
+            client: {
+                clientName: 'WEB',
+                clientVersion,
+                hl,
+                gl,
+                ...(cfg.visitorData ? { visitorData: cfg.visitorData } : {})
+            }
+        };
+        const contextPayload = cfg.fullContext?.client?.clientName === 'WEB' ? cfg.fullContext : ctxWebLimpio;
+
+        const intentarPanel = async (contexto, hdrs, anonymous = false) => {
+            const resp = await peticionHttpBaja(urlEndpoint, {
+                method: 'POST',
+                preferirFetch: true,
+                anonymous,
+                headers: hdrs,
+                body: JSON.stringify({
+                    context: contexto,
+                    panelId: 'PAmodern_transcript_view',
+                    params: paramsPanel
+                }),
+                timeout: 7000
+            });
+            if (resp.status === 200 && resp.text) {
+                const data = JSON.parse(resp.text);
+                return { status: 200, subs: parsearRespuestaGetPanel(data) };
+            }
+            return { status: resp.status, subs: [] };
+        };
+
+        try {
+            const res1 = await intentarPanel(contextPayload, headers, false);
+            if (res1.subs.length > 0) return res1.subs;
+            if (res1.status === 400 || res1.status === 401 || res1.status === 403) {
+                const hdrsMin = {
+                    'Content-Type': 'application/json',
+                    'X-YouTube-Client-Name': '1',
+                    'X-YouTube-Client-Version': clientVersion
+                };
+                const res2 = await intentarPanel(ctxWebLimpio, hdrsMin, true);
+                if (res2.subs.length > 0) return res2.subs;
+            }
+        } catch (e) {
+            if (e?.esCancelacion || cancelado) throw e;
+        }
+
+        return [];
+    }
+
     async function obtenerSubtitulosRobusto(pistaElegida, videoId, idiomaPreferido = 'es') {
         const codigoIdioma = pistaElegida?.languageCode || idiomaPreferido;
         const esAuto = pistaElegida?.kind === 'asr';
@@ -2310,6 +2477,10 @@
             if (cuesCache && cuesCache.length > 0) {
                 return decodeSubtitles(cuesCache).filter(s => s.text.length > 0);
             }
+        }
+
+        if (esTimedtextBloqueado()) {
+            return [];
         }
 
         const candidatos = generarCandidatosSubtitulos(
@@ -2326,30 +2497,19 @@
 
             for (const preferirFetch of vias) {
                 try {
-                    let res = await peticionHttpBaja(candUrl, {
+                    const res = await peticionHttpBaja(candUrl, {
                         method: 'GET',
                         preferirFetch,
                         timeout: 5500
                     });
 
-                    if (res.status === 429 || esRespuestaCaptcha(res.status, res.text, res.finalUrl)) {
-                        await dormir(2500 + Math.random() * 1500);
-                        verificarCancelacion();
-                        res = await peticionHttpBaja(candUrl, {
-                            method: 'GET',
-                            preferirFetch,
-                            timeout: 5500
-                        });
-                        if (res.status === 429 || esRespuestaCaptcha(res.status, res.text, res.finalUrl)) {
-                            activarPausaPorCaptcha(res.finalUrl || candUrl);
-                            await esperarResolucionCaptcha();
-                            verificarCancelacion();
-                            res = await peticionHttpBaja(candUrl, {
-                                method: 'GET',
-                                preferirFetch,
-                                timeout: 5500
-                            });
-                        }
+                    if (
+                        res.status === 429 ||
+                        String(res.finalUrl || '').toLowerCase().includes('/sorry') ||
+                        esRespuestaCaptcha(res.status, res.text, res.finalUrl)
+                    ) {
+                        marcarTimedtextBloqueado(90000);
+                        return [];
                     }
 
                     if (res.status === 200 && res.text) {
@@ -2375,9 +2535,9 @@
                 return [];
             }
 
-            // 1. Revisar si ya está en caché de get_transcript o timedtext
+            // 1. Revisar si ya está en caché de get_transcript, get_panel o timedtext
             if (_transcriptJsonPorVideoId.has(videoId)) {
-                const sub = parsearRespuestaGetTranscript(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
+                const sub = parsearRespuestaGetPanel(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
                 if (sub.length > 0) return sub;
             }
             if (_subtitulosCachePorVideoId.has(videoId)) {
@@ -2397,8 +2557,11 @@
                 }
             }
 
+            const btnExpand = document.querySelector('#description-inline-expander #expand, ytd-text-inline-expander #expand');
+            if (btnExpand) btnExpand.click();
+
             const btnTranscriptDom = document.querySelector(
-                'ytd-video-description-transcript-section-renderer button, button[aria-label*="transcripci" i], button[aria-label*="transcript" i]'
+                'ytd-video-description-transcript-section-renderer button, button[aria-label*="Mostrar transcripci" i], button[aria-label*="Show transcript" i], button[aria-label*="transcripci" i], button[aria-label*="transcript" i]'
             );
             if (btnTranscriptDom) {
                 btnTranscriptDom.click();
@@ -2407,7 +2570,7 @@
             const inicio = Date.now();
             while (Date.now() - inicio < 3200) {
                 if (_transcriptJsonPorVideoId.has(videoId)) {
-                    const sub = parsearRespuestaGetTranscript(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
+                    const sub = parsearRespuestaGetPanel(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
                     if (sub.length > 0) return sub;
                 }
                 if (_subtitulosCachePorVideoId.has(videoId)) {
@@ -2420,8 +2583,8 @@
                 if (segsDom.length > 0) {
                     const domCues = [];
                     segsDom.forEach(nodo => {
-                        const tTxt = nodo.querySelector('.segment-timestamp, [class*="timestamp"]')?.textContent?.trim() || '0:00';
-                        const bTxt = nodo.querySelector('.segment-text, yt-formatted-string, [class*="segment-text"]')?.textContent?.trim() || '';
+                        const tTxt = nodo.querySelector('.segment-timestamp, .ytwTranscriptSegmentViewModelTimestamp, [class*="Timestamp"], [class*="timestamp"]')?.textContent?.trim() || '0:00';
+                        const bTxt = nodo.querySelector('.segment-text, yt-formatted-string, span[role="text"], .yt-core-attributed-string, [class*="segment-text"]')?.textContent?.trim() || '';
                         if (bTxt) domCues.push({ tTxt, bTxt });
                     });
                     const convertidos = convertirDomCuesASubtitulos(domCues);
@@ -2473,6 +2636,7 @@
         let estadoPlayability = 'OK';
         let transcriptParamsHtml = [];
         let visitorDataVideo = '';
+        let vinoDePanelModerno = false;
 
         const enMismoVideoWatch =
             location.pathname.includes('/watch') &&
@@ -2504,22 +2668,31 @@
                         }
                     }
                 }
-                if (_subtitulosCachePorVideoId.has(videoId) && pistaUsada) {
+                if (_transcriptJsonPorVideoId.has(videoId)) {
+                    const subCache = parsearRespuestaGetPanel(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
+                    if (subCache.length > 0) {
+                        subtitulos = subCache;
+                        vinoDePanelModerno = true;
+                        tuvoPistas = true;
+                    }
+                }
+                if (subtitulos.length === 0 && _subtitulosCachePorVideoId.has(videoId) && pistaUsada) {
                     subtitulos = await obtenerSubtitulosRobusto(pistaUsada, videoId, 'es');
                 }
             } catch {}
         }
 
-        // CAPA 1 HÍBRIDA (Paralelo ANDROID/IOS + WEB Player JSON ~169ms):
+        // CAPA 1 HÍBRIDA (Paralelo get_panel PAmodern_transcript_view + WEB Player JSON ~120ms, 0 hits a /api/timedtext):
+        // Resuelve videos, Shorts y Lives sin detonar los HTTP 429 de /api/timedtext; usa ANDROID/IOS/MWEB solo si hace falta.
         if (subtitulos.length === 0 || fecha === '0000-00-00') {
             try {
-                const [infoMovil, infoWeb] = await Promise.all([
+                const [subsPanel, infoWeb] = await Promise.all([
                     subtitulos.length === 0
-                        ? obtenerPlayerMultiCliente(videoId, visitorDataVideo).catch(e => {
+                        ? obtenerSubtitulosViaGetPanel(videoId, 'es').catch(e => {
                               if (e?.esCancelacion || cancelado) throw e;
-                              return null;
+                              return [];
                           })
-                        : Promise.resolve(null),
+                        : Promise.resolve([]),
                     obtenerPlayerWebLigero(videoId).catch(e => {
                         if (e?.esCancelacion || cancelado) throw e;
                         return null;
@@ -2527,32 +2700,49 @@
                 ]);
 
                 if (infoWeb?.titulo) tituloReal = infoWeb.titulo;
-                else if (infoMovil?.titulo && (!tituloReal || tituloReal === videoId)) tituloReal = infoMovil.titulo;
-
                 if (infoWeb?.fecha && infoWeb.fecha !== '0000-00-00') fecha = infoWeb.fecha;
-                else if (infoMovil?.fecha && infoMovil.fecha !== '0000-00-00' && fecha === '0000-00-00') fecha = infoMovil.fecha;
-
                 if (infoWeb?.playabilityStatus && infoWeb.playabilityStatus !== 'OK') {
                     estadoPlayability = infoWeb.playabilityStatus;
-                } else if (infoMovil?.playabilityStatus && infoMovil.playabilityStatus !== 'OK') {
-                    estadoPlayability = infoMovil.playabilityStatus;
                 }
-
                 if (!visitorDataVideo && infoWeb?.visitorData) {
                     visitorDataVideo = infoWeb.visitorData;
                 }
-
-                if (subtitulos.length === 0 && infoMovil?.pistas?.length > 0) {
-                    tuvoPistas = true;
-                    const pistaMovil = elegirPistaSubtitulo(infoMovil.pistas);
-                    if (pistaMovil) {
-                        pistaUsada = pistaMovil;
-                        subtitulos = await obtenerSubtitulosRobusto(pistaMovil, videoId, 'es');
-                    }
-                } else if (infoWeb?.pistas?.length > 0) {
+                if (infoWeb?.pistas?.length > 0) {
                     tuvoPistas = true;
                     if (!pistaUsada) {
                         pistaUsada = elegirPistaSubtitulo(infoWeb.pistas);
+                    }
+                }
+
+                if (subsPanel.length > 0) {
+                    subtitulos = subsPanel;
+                    tuvoPistas = true;
+                    vinoDePanelModerno = true;
+                }
+
+                if (subtitulos.length === 0) {
+                    const infoMovil = await obtenerPlayerMultiCliente(videoId, visitorDataVideo).catch(e => {
+                        if (e?.esCancelacion || cancelado) throw e;
+                        return null;
+                    });
+
+                    if (infoMovil?.titulo && (!tituloReal || tituloReal === videoId)) tituloReal = infoMovil.titulo;
+                    if (infoMovil?.fecha && infoMovil.fecha !== '0000-00-00' && fecha === '0000-00-00') {
+                        fecha = infoMovil.fecha;
+                    }
+                    if (infoMovil?.playabilityStatus && infoMovil.playabilityStatus !== 'OK' && estadoPlayability === 'OK') {
+                        estadoPlayability = infoMovil.playabilityStatus;
+                    }
+
+                    if (infoMovil?.pistas?.length > 0) {
+                        tuvoPistas = true;
+                        const pistaMovil = elegirPistaSubtitulo(infoMovil.pistas);
+                        if (pistaMovil) {
+                            pistaUsada = pistaMovil;
+                            if (!esTimedtextBloqueado() || _subtitulosCachePorVideoId.has(videoId)) {
+                                subtitulos = await obtenerSubtitulosRobusto(pistaMovil, videoId, 'es');
+                            }
+                        }
                     }
                 }
             } catch (e) {
@@ -2614,7 +2804,7 @@
             }
         }
 
-        if (subtitulos.length === 0 && pistaUsada?.baseUrl) {
+        if (subtitulos.length === 0 && pistaUsada?.baseUrl && (!esTimedtextBloqueado() || _subtitulosCachePorVideoId.has(videoId))) {
             subtitulos = await obtenerSubtitulosRobusto(pistaUsada, videoId, 'es');
         }
 
@@ -2693,7 +2883,7 @@
         const idiomaEtiqueta =
             (pistaUsada?.languageCode || 'es') +
             (pistaUsada?.kind === 'asr' ? ' auto' : '') +
-            (pistaUsada?.necesitaTraducir ? ' -> es' : '');
+            (pistaUsada?.necesitaTraducir && !vinoDePanelModerno ? ' -> es' : '');
 
         return {
             fecha,

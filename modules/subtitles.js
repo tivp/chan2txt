@@ -69,6 +69,27 @@ export function generarParamsProtobufGetTranscript(videoId, languageCode = 'es',
     return Array.from(new Set(candidatos));
 }
 
+// Genera params Base64 del panel moderno de transcripcion (PAmodern_transcript_view)
+export function generarParamsProtobufGetPanel(videoId) {
+    if (!videoId) return '';
+    const idBytes = Array.from(new TextEncoder().encode(String(videoId).trim()));
+    const pushVarint = (arr, n) => {
+        let v = n >>> 0;
+        while (v >= 0x80) {
+            arr.push((v & 0x7f) | 0x80);
+            v >>>= 7;
+        }
+        arr.push(v);
+    };
+    const inner = [0x0a];
+    pushVarint(inner, idBytes.length);
+    inner.push(...idBytes, 0x18, 0x02);
+    const outer = [0xaa, 0x09];
+    pushVarint(outer, inner.length);
+    outer.push(...inner);
+    return bytesToBase64(outer);
+}
+
 // ==================================================
 // NÚCLEO DE FORMATEO DE SUBTÍTULOS (BLOQUES DE 200 CARACTERES)
 // ==================================================
@@ -401,13 +422,17 @@ export function parsearPayloadSubtitulo(textoRaw) {
     return null;
 }
 
+export function parsearRespuestaGetPanel(data) {
+    return parsearRespuestaGetTranscript(data);
+}
+
 export function parsearRespuestaGetTranscript(data) {
     const cues = [];
 
-    const recorrer = nodo => {
+    const recorrer = (nodo, startSecPadre = null) => {
         if (!nodo || typeof nodo !== 'object') return;
         if (Array.isArray(nodo)) {
-            for (const el of nodo) recorrer(el);
+            for (const el of nodo) recorrer(el, startSecPadre);
             return;
         }
 
@@ -433,15 +458,22 @@ export function parsearRespuestaGetTranscript(data) {
         if (nodo.transcriptSegmentViewModel) {
             const vm = nodo.transcriptSegmentViewModel;
             const txt =
+                vm.simpleText ||
                 vm.text?.content ||
                 vm.snippet?.content ||
                 vm.subtitle?.content ||
+                (Array.isArray(vm.snippet?.runs) ? vm.snippet.runs.map(r => r?.text || '').join('') : '') ||
                 '';
-            let startSec = 0;
+            let startSec = typeof startSecPadre === 'number' && !Number.isNaN(startSecPadre)
+                ? startSecPadre
+                : 0;
             if (vm.startTimeMs !== undefined) {
                 startSec = parseFloat(vm.startTimeMs) / 1000;
-            } else if (vm.timestamp?.content || vm.timestampText) {
-                startSec = parseClockTimeToSeconds(vm.timestamp?.content || vm.timestampText);
+            } else if (startSecPadre === null || startSecPadre === undefined) {
+                const tsRaw = typeof vm.timestamp === 'string'
+                    ? vm.timestamp
+                    : (vm.timestamp?.content || vm.timestampText || '');
+                if (tsRaw) startSec = parseClockTimeToSeconds(tsRaw);
             }
             if (txt.trim()) {
                 cues.push({
@@ -454,12 +486,17 @@ export function parsearRespuestaGetTranscript(data) {
         }
 
         if (nodo.macroMarkersPanelItemViewModel && nodo.macroMarkersPanelItemViewModel.item) {
-            recorrer(nodo.macroMarkersPanelItemViewModel.item);
+            const m = nodo.macroMarkersPanelItemViewModel;
+            const startRaw = m.onTap?.innertubeCommand?.watchEndpoint?.startTimeSeconds;
+            const startHeredado = startRaw !== undefined && startRaw !== null && !Number.isNaN(Number(startRaw))
+                ? Number(startRaw)
+                : startSecPadre;
+            recorrer(m.item, startHeredado);
             return;
         }
 
         for (const v of Object.values(nodo)) {
-            if (v && typeof v === 'object') recorrer(v);
+            if (v && typeof v === 'object') recorrer(v, startSecPadre);
         }
     };
 
