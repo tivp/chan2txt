@@ -267,42 +267,6 @@ export function extraerItemsYContinuacionDePlaylist(nodoRaiz, categoria) {
             return;
         }
 
-        if (obj.videoRenderer || obj.gridVideoRenderer) {
-            const vr = obj.videoRenderer || obj.gridVideoRenderer;
-            const videoId = vr.videoId;
-            const nombre =
-                vr.title?.runs?.map(r => r.text).join('') ||
-                vr.title?.simpleText ||
-                vr.title?.accessibility?.accessibilityData?.label ||
-                videoId;
-            if (videoId) {
-                videos.push({
-                    videoId,
-                    nombre: texto(nombre),
-                    categoria
-                });
-            }
-            return;
-        }
-
-        if (obj.reelItemRenderer) {
-            const rir = obj.reelItemRenderer;
-            const videoId = rir.videoId;
-            const nombre =
-                rir.headline?.simpleText ||
-                rir.headline?.runs?.map(r => r.text).join('') ||
-                rir.accessibility?.accessibilityData?.label ||
-                videoId;
-            if (videoId) {
-                videos.push({
-                    videoId,
-                    nombre: texto(nombre),
-                    categoria: 'Shorts'
-                });
-            }
-            return;
-        }
-
         if (obj.lockupViewModel) {
             const lvm = obj.lockupViewModel;
             const videoId =
@@ -350,8 +314,7 @@ export function extraerItemsYContinuacionDePlaylist(nodoRaiz, categoria) {
                 cir.continuationEndpoint?.continuationCommand?.token ||
                 cir.continuationEndpoint?.commandExecutorCommand?.commands?.find(
                     c => c.continuationCommand?.token
-                )?.continuationCommand?.token ||
-                cir.button?.buttonRenderer?.command?.continuationCommand?.token;
+                )?.continuationCommand?.token;
             if (token) {
                 tokenContinuacion = token;
             }
@@ -361,7 +324,6 @@ export function extraerItemsYContinuacionDePlaylist(nodoRaiz, categoria) {
         if (obj.continuationItemViewModel) {
             const civm = obj.continuationItemViewModel;
             const token =
-                civm.continuationCommand?.token ||
                 civm.continuationCommand?.continuationCommand?.token ||
                 civm.continuationCommand?.innertubeCommand?.continuationCommand?.token;
             if (token) {
@@ -381,42 +343,86 @@ export function extraerItemsYContinuacionDePlaylist(nodoRaiz, categoria) {
     return { videos, tokenContinuacion };
 }
 
+function construirResultadoPrimeraPaginaPlaylist(data, categoria) {
+    if (!data || typeof data !== 'object') {
+        return { conteo: 0, videos: [], tokenContinuacion: null, ok: false };
+    }
+    const { videos, tokenContinuacion } = extraerItemsYContinuacionDePlaylist(
+        data.contents || data,
+        categoria
+    );
+    const conteoCabecera = parsearConteoPlaylist(data);
+    const conteo = Math.max(conteoCabecera || 0, videos.length);
+    return {
+        conteo,
+        videos,
+        tokenContinuacion,
+        ok: videos.length > 0 || conteo > 0
+    };
+}
+
 export async function consultarPrimeraPaginaPlaylist(playlistId, categoria) {
     try {
         const url = `https://www.youtube.com/playlist?list=${encodeURIComponent(playlistId)}&hl=es`;
-        let html = await fetchTexto(url);
-        const data = extraerYtInitialDataDeHtml(html);
+        let html = await fetchTexto(url).catch(() => '');
+        const dataHtml = html ? extraerYtInitialDataDeHtml(html) : null;
         html = '';
-        if (!data) {
-            return { conteo: 0, videos: [], tokenContinuacion: null, ok: false };
+
+        const resHtml = construirResultadoPrimeraPaginaPlaylist(dataHtml, categoria);
+        if (resHtml.videos.length > 0) {
+            return resHtml;
         }
-
-        const { videos, tokenContinuacion } = extraerItemsYContinuacionDePlaylist(
-            data.contents,
-            categoria
-        );
-
-        const conteoCabecera = parsearConteoPlaylist(data);
-        const conteo = Math.max(conteoCabecera || 0, videos.length);
-
-        return {
-            conteo,
-            videos,
-            tokenContinuacion,
-            ok: true
-        };
     } catch {
-        return { conteo: 0, videos: [], tokenContinuacion: null, ok: false };
+        // Reintentar con endpoint browse VL+playlistId como respaldo híbrido.
     }
+
+    // Fallback híbrido: /youtubei/v1/browse con browseId = "VL" + playlistId
+    try {
+        const { headers, cfg } = await construirHeadersInnerTube(true);
+        const urlBrowse = `https://www.youtube.com/youtubei/v1/browse?prettyPrint=false${cfg.apiKey ? `&key=${encodeURIComponent(cfg.apiKey)}` : ''}`;
+        const contextPayload = cfg.fullContext || {
+            client: {
+                clientName: 'WEB',
+                clientVersion: cfg.clientVersion || '2.20260401.01.00',
+                hl: cfg.hl || 'es',
+                gl: cfg.gl || 'ES',
+                ...(cfg.visitorData ? { visitorData: cfg.visitorData } : {})
+            }
+        };
+        const enYoutube = typeof location !== 'undefined' && /^https:\/\/(?:www|m)\.youtube\.com$/i.test(location.origin);
+        const vias = enYoutube ? [true, false] : [false, true];
+
+        for (const preferirFetch of vias) {
+            try {
+                const resp = await peticionHttpBaja(urlBrowse, {
+                    method: 'POST',
+                    preferirFetch,
+                    headers,
+                    body: JSON.stringify({
+                        context: contextPayload,
+                        browseId: `VL${playlistId}`
+                    })
+                });
+                if (resp.status >= 200 && resp.status < 300 && resp.text) {
+                    const resBrowse = construirResultadoPrimeraPaginaPlaylist(JSON.parse(resp.text), categoria);
+                    if (resBrowse.ok) return resBrowse;
+                }
+            } catch {}
+        }
+    } catch {}
+
+    return { conteo: 0, videos: [], tokenContinuacion: null, ok: false };
 }
 
 export async function cargarContinuacionPlaylist(token, clientVersion, categoria) {
+    const enYoutube = typeof location !== 'undefined' && /^https:\/\/(?:www|m)\.youtube\.com$/i.test(location.origin);
+    const vias = enYoutube ? [true, false] : [false, true];
     let ultimoError = null;
 
     for (let intento = 0; intento < 3; intento++) {
         verificarCancelacion();
         if (intento > 0) {
-            await dormir(600 * intento);
+            await dormir(500 * intento);
             verificarCancelacion();
         }
 
@@ -426,82 +432,92 @@ export async function cargarContinuacionPlaylist(token, clientVersion, categoria
         try {
             const { headers, cfg } = await construirHeadersInnerTube(true);
             const urlBrowse = `https://www.youtube.com/youtubei/v1/browse?prettyPrint=false${cfg.apiKey ? `&key=${encodeURIComponent(cfg.apiKey)}` : ''}`;
-            const contextPayload = cfg.fullContext || {
-                client: {
-                    clientName: 'WEB',
-                    clientVersion: clientVersion || cfg.clientVersion || '2.20260401.01.00',
-                    hl: cfg.hl || 'es',
-                    gl: cfg.gl || 'ES',
-                    ...(cfg.visitorData ? { visitorData: cfg.visitorData } : {})
-                }
-            };
-
-            const resp = await peticionHttpBaja(urlBrowse, {
-                method: 'POST',
-                preferirFetch: true,
-                headers,
-                body: JSON.stringify({
-                    context: contextPayload,
-                    continuation: token
-                })
+            const bodyAuth = JSON.stringify({
+                context: cfg.fullContext || {
+                    client: {
+                        clientName: 'WEB',
+                        clientVersion: clientVersion || cfg.clientVersion || '2.20260401.01.00',
+                        hl: cfg.hl || 'es',
+                        gl: cfg.gl || 'ES',
+                        ...(cfg.visitorData ? { visitorData: cfg.visitorData } : {})
+                    }
+                },
+                continuation: token
             });
 
-            if (resp.status === 429) hitRateLimit = true;
-            if (resp.status >= 200 && resp.status < 300 && resp.text) {
-                const data = JSON.parse(resp.text);
-                const parsed = extraerItemsYContinuacionDePlaylist(data, categoria);
-                if (parsed.videos.length > 0) {
-                    return parsed;
+            for (const preferirFetch of vias) {
+                try {
+                    const resp = await peticionHttpBaja(urlBrowse, {
+                        method: 'POST',
+                        preferirFetch,
+                        headers,
+                        body: bodyAuth
+                    });
+                    if (resp.status === 429) hitRateLimit = true;
+                    if (resp.status >= 200 && resp.status < 300 && resp.text) {
+                        const data = JSON.parse(resp.text);
+                        const parsed = extraerItemsYContinuacionDePlaylist(
+                            data.onResponseReceivedActions || data.continuationContents || data,
+                            categoria
+                        );
+                        if (parsed.videos.length > 0) return parsed;
+                        respuestaValida = true;
+                        break;
+                    }
+                } catch (e) {
+                    if (e.esCancelacion || cancelado) throw e;
+                    ultimoError = e;
                 }
-                respuestaValida = true;
             }
         } catch (e) {
-            if (cancelado) throw e;
+            if (e.esCancelacion || cancelado) throw e;
             ultimoError = e;
         }
 
-        try {
-            const respAnon = await peticionHttpBaja(
-                'https://www.youtube.com/youtubei/v1/browse?prettyPrint=false',
-                {
-                    method: 'POST',
-                    preferirFetch: true,
-                    anonymous: true,
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        context: {
-                            client: {
-                                clientName: 'WEB',
-                                clientVersion: clientVersion || '2.20260401.01.00',
-                                hl: 'es'
-                            }
-                        },
-                        continuation: token
-                    })
+        const bodyAnon = JSON.stringify({
+            context: {
+                client: {
+                    clientName: 'WEB',
+                    clientVersion: clientVersion || '2.20260401.01.00',
+                    hl: 'es'
                 }
-            );
+            },
+            continuation: token
+        });
 
-            if (respAnon.status === 429) hitRateLimit = true;
-            if (respAnon.status >= 200 && respAnon.status < 300 && respAnon.text) {
-                const dataAnon = JSON.parse(respAnon.text);
-                const parsedAnon = extraerItemsYContinuacionDePlaylist(dataAnon, categoria);
-                if (parsedAnon.videos.length > 0) {
-                    return parsedAnon;
+        for (const preferirFetch of vias) {
+            try {
+                const respAnon = await peticionHttpBaja(
+                    'https://www.youtube.com/youtubei/v1/browse?prettyPrint=false',
+                    {
+                        method: 'POST',
+                        preferirFetch,
+                        anonymous: true,
+                        headers: { 'Content-Type': 'application/json' },
+                        body: bodyAnon
+                    }
+                );
+                if (respAnon.status === 429) hitRateLimit = true;
+                if (respAnon.status >= 200 && respAnon.status < 300 && respAnon.text) {
+                    const dataAnon = JSON.parse(respAnon.text);
+                    const parsedAnon = extraerItemsYContinuacionDePlaylist(
+                        dataAnon.onResponseReceivedActions || dataAnon.continuationContents || dataAnon,
+                        categoria
+                    );
+                    if (parsedAnon.videos.length > 0) return parsedAnon;
+                    respuestaValida = true;
+                    break;
                 }
-                respuestaValida = true;
+            } catch (e) {
+                if (e.esCancelacion || cancelado) throw e;
+                ultimoError = e;
             }
-        } catch (e) {
-            if (cancelado) throw e;
-            ultimoError = e;
         }
 
         if (hitRateLimit) {
             await dormir(2000);
             continue;
         }
-
         if (respuestaValida) {
             return { videos: [], tokenContinuacion: null };
         }
@@ -647,7 +663,7 @@ export async function construirColaVideos(pc) {
         return enDom;
     }
 
-    if (!pc.conteoListo || pc.categoriasDescubiertas.size === 0) {
+    if (!pc.conteoListo || (pc.categoriasDescubiertas.size === 0 && !pc.infoGeneralUU)) {
         progreso(pc, 0, 1, 'Obteniendo información del canal...');
         await descubrirTotalesCanalEnSegundoPlano(pc);
     }
@@ -694,7 +710,7 @@ export async function construirColaVideos(pc) {
                 token = sig.tokenContinuacion;
                 pagina++;
             } catch (e) {
-                if (cancelado || e?.esCancelacion) throw e;
+                if (e?.esCancelacion || cancelado) throw e;
                 break;
             }
         }
@@ -710,7 +726,8 @@ export async function construirColaVideos(pc) {
         }
     }
 
-    if (cola.length < limiteGlobal && pc.infoGeneralUU) {
+    const tieneUulf = (pc.categoriasDescubiertas.get('Videos')?.videos?.length || 0) > 0;
+    if ((cola.length === 0 || !tieneUulf) && cola.length < limiteGlobal && pc.infoGeneralUU) {
         const infoUU = pc.infoGeneralUU;
         let tokenUU = infoUU.tokenContinuacion;
         let paginaUU = 1;
@@ -721,7 +738,7 @@ export async function construirColaVideos(pc) {
             vistos.add(v.videoId);
             cola.push({
                 ...v,
-                carpeta: v.categoria === 'Shorts' ? 'Shorts' : 'Videos'
+                carpeta: 'Videos'
             });
         }
 
@@ -746,13 +763,13 @@ export async function construirColaVideos(pc) {
                     vistos.add(v.videoId);
                     cola.push({
                         ...v,
-                        carpeta: v.categoria === 'Shorts' ? 'Shorts' : 'Videos'
+                        carpeta: 'Videos'
                     });
                 }
                 tokenUU = sig.tokenContinuacion;
                 paginaUU++;
             } catch (e) {
-                if (cancelado || e?.esCancelacion) throw e;
+                if (e?.esCancelacion || cancelado) throw e;
                 break;
             }
         }

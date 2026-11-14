@@ -1344,21 +1344,6 @@
         return null;
     }
 
-    function esUrlMismoOrigenYoutube(url) {
-        try {
-            if (typeof location !== 'undefined' && /^https?:$/i.test(location.protocol)) {
-                const parsed = new URL(url, location.href);
-                return (
-                    parsed.origin === location.origin &&
-                    /^https:\/\/(?:www|m)\.youtube\.com$/i.test(parsed.origin)
-                );
-            }
-            return /^https:\/\/(?:www|m)\.youtube\.com(?:\/|$)/i.test(String(url || ''));
-        } catch {
-            return false;
-        }
-    }
-
     function peticionHttpBaja(url, opciones = {}) {
         verificarCancelacion();
 
@@ -1371,17 +1356,8 @@
         const data = opciones.body || opciones.data || undefined;
         const anonymous = Boolean(opciones.anonymous);
         const gm = obtenerGmTransporte();
-        const preferirFetch =
-            opciones.preferirFetch !== undefined
-                ? Boolean(opciones.preferirFetch)
-                : Boolean(
-                      !opciones.forzarGm &&
-                          typeof window !== 'undefined' &&
-                          window.__chan2txtGmPolyfillReady &&
-                          esUrlMismoOrigenYoutube(url)
-                  );
 
-        if (gm && !preferirFetch) {
+        if (gm && !opciones.preferirFetch) {
             return new Promise((resolve, reject) => {
                 if (cancelado) {
                     const err = new Error('Descarga detenida por el usuario');
@@ -1469,16 +1445,9 @@
                 ctrl.abort();
             }, opciones.timeout || CFG.TIMEOUT);
 
-            const headersFetch = {};
-            for (const [k, v] of Object.entries(headers)) {
-                if (!/^(?:user-agent|origin|referer|host)$/i.test(k)) {
-                    headersFetch[k] = v;
-                }
-            }
-
             fetchFn.call(win, url, {
                 method,
-                headers: headersFetch,
+                headers,
                 body: data,
                 credentials: anonymous ? 'omit' : 'include',
                 cache: 'no-store',
@@ -1702,93 +1671,159 @@
                 return Array.from(new Set(params));
             }
         } catch (e) {
-            if (cancelado) throw e;
+            if (e.esCancelacion || cancelado) throw e;
         }
         return [];
     }
 
-    // Consulta /youtubei/v1/player con clientes ANDROID / IOS / MWEB / WEB_EMBEDDED (que entregan URLs de subtítulos sin exigencia de PO Token de navegador)
+    function construirResumenPlayerResponse(pr, cliente = 'WEB') {
+        if (!pr || typeof pr !== 'object') return null;
+        return {
+            cliente,
+            pr,
+            pistas: extraerPistasDePlayerResponse(pr),
+            titulo: texto(pr?.videoDetails?.title || ''),
+            fecha: extraerFechaPublicacion(pr),
+            playabilityStatus: pr?.playabilityStatus?.status || 'OK',
+            visitorData: pr?.responseContext?.visitorData || ''
+        };
+    }
+
+    function viasFetchDisponibles() {
+        const enYoutube = typeof location !== 'undefined' && /^https:\/\/(?:www|m)\.youtube\.com$/i.test(location.origin);
+        return enYoutube ? [true, false] : [false, true];
+    }
+
+    // Consulta ligera WEB /youtubei/v1/player para obtener publishDate, titulo y estado en JSON (~15 KB vs 900 KB HTML)
+    async function obtenerPlayerWebLigero(videoId) {
+        verificarCancelacion();
+        const cfg = obtenerConfigYtcfg();
+        const urlPlayer = `https://www.youtube.com/youtubei/v1/player?prettyPrint=false${cfg.apiKey ? `&key=${encodeURIComponent(cfg.apiKey)}` : ''}`;
+        const payload = {
+            context: {
+                client: {
+                    clientName: 'WEB',
+                    clientVersion: cfg.clientVersion || '2.20260401.01.00',
+                    hl: cfg.hl || 'es',
+                    gl: cfg.gl || 'ES',
+                    ...(cfg.visitorData ? { visitorData: cfg.visitorData } : {})
+                }
+            },
+            videoId,
+            contentCheckOk: true,
+            racyCheckOk: true
+        };
+        const headersWeb = {
+            'Content-Type': 'application/json',
+            'X-Youtube-Client-Name': '1',
+            'X-Youtube-Client-Version': String(cfg.clientVersion || '2.20260401.01.00')
+        };
+
+        for (const preferirFetch of viasFetchDisponibles()) {
+            verificarCancelacion();
+            try {
+                const resp = await peticionHttpBaja(urlPlayer, {
+                    method: 'POST',
+                    preferirFetch,
+                    headers: headersWeb,
+                    body: JSON.stringify(payload),
+                    timeout: 5000
+                });
+                if (resp.status === 200 && resp.text) {
+                    return construirResumenPlayerResponse(JSON.parse(resp.text), 'WEB');
+                }
+            } catch (e) {
+                if (e.esCancelacion || cancelado) throw e;
+            }
+        }
+        return null;
+    }
+
+    // Consulta /youtubei/v1/player con clientes ANDROID / IOS / MWEB / WEB_EMBEDDED (URLs sin exigencia de PO Token)
     async function obtenerPlayerMultiCliente(videoId, visitorDataOverride = '') {
         verificarCancelacion();
         const cfg = obtenerConfigYtcfg();
         const urlPlayer = `https://www.youtube.com/youtubei/v1/player?prettyPrint=false${cfg.apiKey ? `&key=${encodeURIComponent(cfg.apiKey)}` : ''}`;
         const vData = visitorDataOverride || cfg.visitorData || '';
+        const vias = viasFetchDisponibles();
+        let mejorMeta = null;
+
+        const consultarCliente = async (cli, modoAnonimo) => {
+            const payload = {
+                context: {
+                    client: {
+                        ...cli.context,
+                        ...(vData ? { visitorData: vData } : {})
+                    },
+                    ...(cli.nombre === 'WEB_EMBEDDED_PLAYER'
+                        ? { thirdParty: { embedUrl: 'https://www.youtube.com/' } }
+                        : {})
+                },
+                videoId,
+                contentCheckOk: true,
+                racyCheckOk: true,
+                ...(cfg.sts ? { playbackContext: { contentPlaybackContext: { signatureTimestamp: Number(cfg.sts) } } } : {})
+            };
+
+            const headersCli = {
+                'Content-Type': 'application/json',
+                'X-Youtube-Client-Name': cli.id,
+                'X-Youtube-Client-Version': cli.context.clientVersion,
+                'Origin': 'https://www.youtube.com',
+                'X-Origin': 'https://www.youtube.com',
+                ...(vData ? { 'X-Goog-Visitor-Id': vData } : {}),
+                ...(cli.ua ? { 'User-Agent': cli.ua } : {})
+            };
+
+            if (!modoAnonimo) {
+                const auth = await calcularSapisidHash('https://www.youtube.com');
+                if (auth) headersCli['Authorization'] = auth;
+            }
+
+            for (const preferirFetch of vias) {
+                verificarCancelacion();
+                try {
+                    const resp = await peticionHttpBaja(urlPlayer, {
+                        method: 'POST',
+                        preferirFetch,
+                        headers: headersCli,
+                        body: JSON.stringify(payload),
+                        anonymous: modoAnonimo,
+                        timeout: 5000
+                    });
+                    if (resp.status === 200 && resp.text) {
+                        const resumen = construirResumenPlayerResponse(JSON.parse(resp.text), cli.nombre);
+                        if (resumen) {
+                            if (!mejorMeta && (resumen.titulo || resumen.playabilityStatus !== 'OK')) {
+                                mejorMeta = resumen;
+                            }
+                            if (resumen.pistas.length > 0) return resumen;
+                            break;
+                        }
+                    }
+                } catch (e) {
+                    if (e.esCancelacion || cancelado) throw e;
+                }
+            }
+            return null;
+        };
 
         for (const cli of CLIENTES_INNERTUBE) {
             verificarCancelacion();
-            try {
-                const payload = {
-                    context: {
-                        client: {
-                            ...cli.context,
-                            ...(vData ? { visitorData: vData } : {})
-                        },
-                        ...(cli.nombre === 'WEB_EMBEDDED_PLAYER'
-                            ? { thirdParty: { embedUrl: 'https://www.youtube.com/' } }
-                            : {})
-                    },
-                    videoId,
-                    contentCheckOk: true,
-                    racyCheckOk: true,
-                    ...(cfg.sts ? { playbackContext: { contentPlaybackContext: { signatureTimestamp: Number(cfg.sts) } } } : {})
-                };
+            const hit = await consultarCliente(cli, true);
+            if (hit) return hit;
+        }
 
-                const headersCli = {
-                    'Content-Type': 'application/json',
-                    'X-Youtube-Client-Name': cli.id,
-                    'X-Youtube-Client-Version': cli.context.clientVersion,
-                    'Origin': 'https://www.youtube.com',
-                    'X-Origin': 'https://www.youtube.com',
-                    ...(vData ? { 'X-Goog-Visitor-Id': vData } : {}),
-                    ...(cli.ua ? { 'User-Agent': cli.ua } : {})
-                };
-
-                // Intento 1: anónimo (Android/iOS funcionan de maravilla sin cookies de navegador web)
-                for (const modoAnonimo of [true, false]) {
-                    verificarCancelacion();
-                    const hFinal = { ...headersCli };
-                    if (!modoAnonimo) {
-                        const auth = await calcularSapisidHash('https://www.youtube.com');
-                        if (auth) hFinal['Authorization'] = auth;
-                    }
-                    for (const preferirFetch of [true, false]) {
-                        try {
-                            const resp = await peticionHttpBaja(urlPlayer, {
-                                method: 'POST',
-                                preferirFetch,
-                                headers: hFinal,
-                                body: JSON.stringify(payload),
-                                anonymous: modoAnonimo,
-                                timeout: 8000
-                            });
-
-                            if (resp.status === 200 && resp.text) {
-                                const pr = JSON.parse(resp.text);
-                                const pistas = extraerPistasDePlayerResponse(pr);
-                                if (pistas.length > 0) {
-                                    return {
-                                        cliente: cli.nombre,
-                                        pr,
-                                        pistas,
-                                        titulo: texto(pr?.videoDetails?.title || ''),
-                                        fecha: extraerFechaPublicacion(pr),
-                                        playabilityStatus: pr?.playabilityStatus?.status || 'OK'
-                                    };
-                                }
-                                if (typeof window !== 'undefined' && window.__chan2txtGmPolyfillReady) {
-                                    break;
-                                }
-                            }
-                        } catch (eCli) {
-                            if (cancelado) throw eCli;
-                        }
-                    }
-                }
-            } catch (e) {
-                if (cancelado) throw e;
+        if (mejorMeta && mejorMeta.playabilityStatus !== 'OK') {
+            for (const cli of CLIENTES_INNERTUBE) {
+                if (cli.nombre !== 'ANDROID' && cli.nombre !== 'WEB_EMBEDDED_PLAYER') continue;
+                verificarCancelacion();
+                const hit = await consultarCliente(cli, false);
+                if (hit) return hit;
             }
         }
-        return null;
+
+        return mejorMeta;
     }
 
     // ==================================================
@@ -2214,7 +2249,12 @@
             pistaElegida?.kind ?? 'asr'
         );
 
-        const unicos = Array.from(new Set([...(paramsExtraidosHtml || []), ...generados]));
+        const unicos = Array.from(
+            new Set([
+                ...(paramsExtraidosHtml || []).slice(0, 2),
+                ...generados.slice(0, 2)
+            ])
+        );
 
         const contextPayload = cfg.fullContext || {
             client: {
@@ -2237,8 +2277,12 @@
                         context: contextPayload,
                         params: paramsStr
                     }),
-                    timeout: 8500
+                    timeout: 4500
                 });
+
+                if (resp.status === 400 || resp.status === 403 || resp.status === 429) {
+                    break;
+                }
 
                 if (resp.status === 200 && resp.text) {
                     const data = JSON.parse(resp.text);
@@ -2248,7 +2292,8 @@
                     }
                 }
             } catch (e) {
-                if (cancelado) throw e;
+                if (e.esCancelacion || cancelado) throw e;
+                break;
             }
         }
 
@@ -2274,26 +2319,48 @@
             esAuto,
             necesitaTraducir
         );
+        const vias = viasFetchDisponibles();
 
         for (const candUrl of candidatos) {
             verificarCancelacion();
 
-            // Intento A: vía peticionHttpBaja (GM_xmlhttpRequest / fetch)
-            for (const preferirFetch of [true, false]) {
+            for (const preferirFetch of vias) {
                 try {
-                    const res = await peticionHttpBaja(candUrl, {
+                    let res = await peticionHttpBaja(candUrl, {
                         method: 'GET',
                         preferirFetch,
-                        timeout: 7000
+                        timeout: 5500
                     });
+
+                    if (res.status === 429 || esRespuestaCaptcha(res.status, res.text, res.finalUrl)) {
+                        await dormir(2500 + Math.random() * 1500);
+                        verificarCancelacion();
+                        res = await peticionHttpBaja(candUrl, {
+                            method: 'GET',
+                            preferirFetch,
+                            timeout: 5500
+                        });
+                        if (res.status === 429 || esRespuestaCaptcha(res.status, res.text, res.finalUrl)) {
+                            activarPausaPorCaptcha(res.finalUrl || candUrl);
+                            await esperarResolucionCaptcha();
+                            verificarCancelacion();
+                            res = await peticionHttpBaja(candUrl, {
+                                method: 'GET',
+                                preferirFetch,
+                                timeout: 5500
+                            });
+                        }
+                    }
+
                     if (res.status === 200 && res.text) {
                         const cues = parsearPayloadSubtitulo(res.text);
                         if (cues && cues.length > 0) {
                             return decodeSubtitles(cues).filter(s => s.text.length > 0);
                         }
+                        break;
                     }
                 } catch (e) {
-                    if (cancelado) throw e;
+                    if (e.esCancelacion || cancelado) throw e;
                 }
             }
         }
@@ -2391,7 +2458,7 @@
     }
 
     // ==================================================
-    // PIPELINE MAESTRO DE EXTRACCIÓN (5 CAPAS DE INGENIERÍA ANTI-ROJO)
+    // PIPELINE MAESTRO HÍBRIDO DE EXTRACCIÓN (5 CAPAS DE ALTA VELOCIDAD)
     // ==================================================
 
     async function procesarVideoATxt(itemVideo) {
@@ -2437,24 +2504,86 @@
                         }
                     }
                 }
+                if (_subtitulosCachePorVideoId.has(videoId) && pistaUsada) {
+                    subtitulos = await obtenerSubtitulosRobusto(pistaUsada, videoId, 'es');
+                }
             } catch {}
         }
 
-        // CAPA 1: Extracción ligera de HTML /watch + Innertube /next en paralelo para obtener fecha, título, pistas y getTranscriptEndpoint firmado
-        if (!enMismoVideoWatch || fecha === '0000-00-00' || transcriptParamsHtml.length === 0) {
+        // CAPA 1 HÍBRIDA (Paralelo ANDROID/IOS + WEB Player JSON ~169ms):
+        if (subtitulos.length === 0 || fecha === '0000-00-00') {
             try {
+                const [infoMovil, infoWeb] = await Promise.all([
+                    subtitulos.length === 0
+                        ? obtenerPlayerMultiCliente(videoId, visitorDataVideo).catch(e => {
+                              if (e?.esCancelacion || cancelado) throw e;
+                              return null;
+                          })
+                        : Promise.resolve(null),
+                    obtenerPlayerWebLigero(videoId).catch(e => {
+                        if (e?.esCancelacion || cancelado) throw e;
+                        return null;
+                    })
+                ]);
+
+                if (infoWeb?.titulo) tituloReal = infoWeb.titulo;
+                else if (infoMovil?.titulo && (!tituloReal || tituloReal === videoId)) tituloReal = infoMovil.titulo;
+
+                if (infoWeb?.fecha && infoWeb.fecha !== '0000-00-00') fecha = infoWeb.fecha;
+                else if (infoMovil?.fecha && infoMovil.fecha !== '0000-00-00' && fecha === '0000-00-00') fecha = infoMovil.fecha;
+
+                if (infoWeb?.playabilityStatus && infoWeb.playabilityStatus !== 'OK') {
+                    estadoPlayability = infoWeb.playabilityStatus;
+                } else if (infoMovil?.playabilityStatus && infoMovil.playabilityStatus !== 'OK') {
+                    estadoPlayability = infoMovil.playabilityStatus;
+                }
+
+                if (!visitorDataVideo && infoWeb?.visitorData) {
+                    visitorDataVideo = infoWeb.visitorData;
+                }
+
+                if (subtitulos.length === 0 && infoMovil?.pistas?.length > 0) {
+                    tuvoPistas = true;
+                    const pistaMovil = elegirPistaSubtitulo(infoMovil.pistas);
+                    if (pistaMovil) {
+                        pistaUsada = pistaMovil;
+                        subtitulos = await obtenerSubtitulosRobusto(pistaMovil, videoId, 'es');
+                    }
+                } else if (infoWeb?.pistas?.length > 0) {
+                    tuvoPistas = true;
+                    if (!pistaUsada) {
+                        pistaUsada = elegirPistaSubtitulo(infoWeb.pistas);
+                    }
+                }
+            } catch (e) {
+                if (e.esCancelacion || cancelado) throw e;
+            }
+        }
+
+        // CAPA 2 (Fallback ligero /watch HTML + Innertube /next): Solo si falta el subtítulo o la fecha
+        if (
+            (!enMismoVideoWatch && (subtitulos.length === 0 || fecha === '0000-00-00')) ||
+            (enMismoVideoWatch && (fecha === '0000-00-00' || (subtitulos.length === 0 && transcriptParamsHtml.length === 0)))
+        ) {
+            try {
+                const necesitaHtml = !enMismoVideoWatch && (subtitulos.length === 0 || fecha === '0000-00-00');
+                const necesitaNext = subtitulos.length === 0;
                 const [rawHtml, paramsNext] = await Promise.all([
-                    !enMismoVideoWatch
+                    necesitaHtml
                         ? fetchTexto(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=es`).catch(() => '')
                         : Promise.resolve(''),
-                    obtenerDatosViaInnertubeNext(videoId).catch(() => [])
+                    necesitaNext
+                        ? obtenerDatosViaInnertubeNext(videoId).catch(() => [])
+                        : Promise.resolve([])
                 ]);
 
                 if (rawHtml) {
                     const datosHtml = extraerDatosLigerosDeHtmlWatch(rawHtml);
                     if (datosHtml.titulo) tituloReal = datosHtml.titulo;
-                    if (datosHtml.fecha !== '0000-00-00') fecha = datosHtml.fecha;
-                    if (datosHtml.playabilityStatus) estadoPlayability = datosHtml.playabilityStatus;
+                    if (datosHtml.fecha !== '0000-00-00' && fecha === '0000-00-00') fecha = datosHtml.fecha;
+                    if (datosHtml.playabilityStatus && datosHtml.playabilityStatus !== 'OK') {
+                        estadoPlayability = datosHtml.playabilityStatus;
+                    }
                     if (datosHtml.visitorData) visitorDataVideo = datosHtml.visitorData;
                     if (datosHtml.transcriptParams.length > 0) {
                         transcriptParamsHtml.push(...datosHtml.transcriptParams);
@@ -2462,7 +2591,9 @@
                     }
                     if (datosHtml.pistas.length > 0) {
                         tuvoPistas = true;
-                        pistaUsada = elegirPistaSubtitulo(datosHtml.pistas);
+                        if (subtitulos.length === 0 || !pistaUsada?.baseUrl) {
+                            pistaUsada = elegirPistaSubtitulo(datosHtml.pistas);
+                        }
                     }
                 }
 
@@ -2472,52 +2603,32 @@
                 }
                 transcriptParamsHtml = Array.from(new Set(transcriptParamsHtml));
             } catch (e) {
-                if (cancelado) throw e;
+                if (e.esCancelacion || cancelado) throw e;
             }
         }
 
-        // CAPA 2: Descarga vía /youtubei/v1/get_transcript con los params oficiales (no requiere PO Token de reproductor)
+        // CAPA 3: Fallback /youtubei/v1/get_transcript (acotado) y pista web directa
         if (subtitulos.length === 0 && (transcriptParamsHtml.length > 0 || tuvoPistas)) {
             if (!pistaUsada?.necesitaTraducir || /^es/i.test(pistaUsada?.languageCode || 'es')) {
                 subtitulos = await extraerSubtitulosViaGetTranscript(videoId, pistaUsada, transcriptParamsHtml);
             }
         }
 
-        // CAPA 3: Multi-Cliente Innertube (/youtubei/v1/player con ANDROID, IOS, MWEB, WEB_EMBEDDED)
-        // Las pistas devueltas por clientes móviles tienen URLs firmadas que descargan el XML/JSON3 al primer intento sin bloqueo de PO Token.
-        if (subtitulos.length === 0) {
-            const infoMovil = await obtenerPlayerMultiCliente(videoId, visitorDataVideo);
-            if (infoMovil) {
-                if (infoMovil.titulo && (!tituloReal || tituloReal === videoId)) tituloReal = infoMovil.titulo;
-                if (infoMovil.fecha && infoMovil.fecha !== '0000-00-00' && fecha === '0000-00-00') fecha = infoMovil.fecha;
-                if (infoMovil.pistas?.length > 0) {
-                    tuvoPistas = true;
-                    const pistaMovil = elegirPistaSubtitulo(infoMovil.pistas);
-                    if (pistaMovil) {
-                        pistaUsada = pistaMovil;
-                        subtitulos = await obtenerSubtitulosRobusto(pistaMovil, videoId, 'es');
-                    }
-                }
-            }
-        }
-
-        // CAPA 4: Si la pista web normal ya tiene PO Token o funciona directo, probarla
         if (subtitulos.length === 0 && pistaUsada?.baseUrl) {
             subtitulos = await obtenerSubtitulosRobusto(pistaUsada, videoId, 'es');
         }
 
-        // Si estamos en /watch y aún no salió, activar el DOM del reproductor actual
+        // CAPA 4: Si estamos en /watch y aún no salió, activar el DOM del reproductor actual
         if (subtitulos.length === 0 && enMismoVideoWatch) {
             subtitulos = await activarSubtitulosEnPlayerActivoDom(videoId);
         }
 
-        // Si la pista era en otro idioma y get_transcript está disponible, usar get_transcript antes de ir al iframe
         if (subtitulos.length === 0 && transcriptParamsHtml.length > 0) {
             subtitulos = await extraerSubtitulosViaGetTranscript(videoId, pistaUsada, transcriptParamsHtml);
         }
 
-        // CAPA 5 (FALLBACK DEFINITIVO): Pool de Iframes /watch Reales con auto-apertura de CC y Panel de Transcripción
-        if (subtitulos.length === 0 && !enMismoVideoWatch) {
+        // CAPA 5 (FALLBACK DEFINITIVO): Pool de Iframes /watch Reales solo si tuvo pistas o requiere sesión
+        if (subtitulos.length === 0 && !enMismoVideoWatch && (tuvoPistas || estadoPlayability !== 'OK')) {
             const resWorker = await extraerMedianteIframeWatchReal(videoId);
             if (resWorker) {
                 if (resWorker.titulo) tituloReal = texto(resWorker.titulo);
@@ -2851,42 +2962,6 @@
                 return;
             }
 
-            if (obj.videoRenderer || obj.gridVideoRenderer) {
-                const vr = obj.videoRenderer || obj.gridVideoRenderer;
-                const videoId = vr.videoId;
-                const nombre =
-                    vr.title?.runs?.map(r => r.text).join('') ||
-                    vr.title?.simpleText ||
-                    vr.title?.accessibility?.accessibilityData?.label ||
-                    videoId;
-                if (videoId) {
-                    videos.push({
-                        videoId,
-                        nombre: texto(nombre),
-                        categoria
-                    });
-                }
-                return;
-            }
-
-            if (obj.reelItemRenderer) {
-                const rir = obj.reelItemRenderer;
-                const videoId = rir.videoId;
-                const nombre =
-                    rir.headline?.simpleText ||
-                    rir.headline?.runs?.map(r => r.text).join('') ||
-                    rir.accessibility?.accessibilityData?.label ||
-                    videoId;
-                if (videoId) {
-                    videos.push({
-                        videoId,
-                        nombre: texto(nombre),
-                        categoria: 'Shorts'
-                    });
-                }
-                return;
-            }
-
             if (obj.lockupViewModel) {
                 const lvm = obj.lockupViewModel;
                 const videoId =
@@ -2934,8 +3009,7 @@
                     cir.continuationEndpoint?.continuationCommand?.token ||
                     cir.continuationEndpoint?.commandExecutorCommand?.commands?.find(
                         c => c.continuationCommand?.token
-                    )?.continuationCommand?.token ||
-                    cir.button?.buttonRenderer?.command?.continuationCommand?.token;
+                    )?.continuationCommand?.token;
                 if (token) {
                     tokenContinuacion = token;
                 }
@@ -2945,7 +3019,6 @@
             if (obj.continuationItemViewModel) {
                 const civm = obj.continuationItemViewModel;
                 const token =
-                    civm.continuationCommand?.token ||
                     civm.continuationCommand?.continuationCommand?.token ||
                     civm.continuationCommand?.innertubeCommand?.continuationCommand?.token;
                 if (token) {
@@ -2965,42 +3038,85 @@
         return { videos, tokenContinuacion };
     }
 
+    function construirResultadoPrimeraPaginaPlaylist(data, categoria) {
+        if (!data || typeof data !== 'object') {
+            return { conteo: 0, videos: [], tokenContinuacion: null, ok: false };
+        }
+        const { videos, tokenContinuacion } = extraerItemsYContinuacionDePlaylist(
+            data.contents || data,
+            categoria
+        );
+        const conteoCabecera = parsearConteoPlaylist(data);
+        const conteo = Math.max(conteoCabecera || 0, videos.length);
+        return {
+            conteo,
+            videos,
+            tokenContinuacion,
+            ok: videos.length > 0 || conteo > 0
+        };
+    }
+
     async function consultarPrimeraPaginaPlaylist(playlistId, categoria) {
         try {
             const url = `https://www.youtube.com/playlist?list=${encodeURIComponent(playlistId)}&hl=es`;
-            let html = await fetchTexto(url);
-            const data = extraerYtInitialDataDeHtml(html);
+            let html = await fetchTexto(url).catch(() => '');
+            const dataHtml = html ? extraerYtInitialDataDeHtml(html) : null;
             html = '';
-            if (!data) {
-                return { conteo: 0, videos: [], tokenContinuacion: null, ok: false };
+
+            const resHtml = construirResultadoPrimeraPaginaPlaylist(dataHtml, categoria);
+            if (resHtml.videos.length > 0) {
+                return resHtml;
             }
-
-            const { videos, tokenContinuacion } = extraerItemsYContinuacionDePlaylist(
-                data.contents,
-                categoria
-            );
-
-            const conteoCabecera = parsearConteoPlaylist(data);
-            const conteo = Math.max(conteoCabecera || 0, videos.length);
-
-            return {
-                conteo,
-                videos,
-                tokenContinuacion,
-                ok: true
-            };
         } catch {
-            return { conteo: 0, videos: [], tokenContinuacion: null, ok: false };
+            // Reintentar con endpoint browse VL+playlistId como respaldo híbrido.
         }
+
+        try {
+            const { headers, cfg } = await construirHeadersInnerTube(true);
+            const urlBrowse = `https://www.youtube.com/youtubei/v1/browse?prettyPrint=false${cfg.apiKey ? `&key=${encodeURIComponent(cfg.apiKey)}` : ''}`;
+            const contextPayload = cfg.fullContext || {
+                client: {
+                    clientName: 'WEB',
+                    clientVersion: cfg.clientVersion || '2.20260401.01.00',
+                    hl: cfg.hl || 'es',
+                    gl: cfg.gl || 'ES',
+                    ...(cfg.visitorData ? { visitorData: cfg.visitorData } : {})
+                }
+            };
+            const enYoutube = typeof location !== 'undefined' && /^https:\/\/(?:www|m)\.youtube\.com$/i.test(location.origin);
+            const vias = enYoutube ? [true, false] : [false, true];
+
+            for (const preferirFetch of vias) {
+                try {
+                    const resp = await peticionHttpBaja(urlBrowse, {
+                        method: 'POST',
+                        preferirFetch,
+                        headers,
+                        body: JSON.stringify({
+                            context: contextPayload,
+                            browseId: `VL${playlistId}`
+                        })
+                    });
+                    if (resp.status >= 200 && resp.status < 300 && resp.text) {
+                        const resBrowse = construirResultadoPrimeraPaginaPlaylist(JSON.parse(resp.text), categoria);
+                        if (resBrowse.ok) return resBrowse;
+                    }
+                } catch {}
+            }
+        } catch {}
+
+        return { conteo: 0, videos: [], tokenContinuacion: null, ok: false };
     }
 
     async function cargarContinuacionPlaylist(token, clientVersion, categoria) {
+        const enYoutube = typeof location !== 'undefined' && /^https:\/\/(?:www|m)\.youtube\.com$/i.test(location.origin);
+        const vias = enYoutube ? [true, false] : [false, true];
         let ultimoError = null;
 
         for (let intento = 0; intento < 3; intento++) {
             verificarCancelacion();
             if (intento > 0) {
-                await dormir(600 * intento);
+                await dormir(500 * intento);
                 verificarCancelacion();
             }
 
@@ -3010,82 +3126,92 @@
             try {
                 const { headers, cfg } = await construirHeadersInnerTube(true);
                 const urlBrowse = `https://www.youtube.com/youtubei/v1/browse?prettyPrint=false${cfg.apiKey ? `&key=${encodeURIComponent(cfg.apiKey)}` : ''}`;
-                const contextPayload = cfg.fullContext || {
-                    client: {
-                        clientName: 'WEB',
-                        clientVersion: clientVersion || cfg.clientVersion || '2.20260401.01.00',
-                        hl: cfg.hl || 'es',
-                        gl: cfg.gl || 'ES',
-                        ...(cfg.visitorData ? { visitorData: cfg.visitorData } : {})
-                    }
-                };
-
-                const resp = await peticionHttpBaja(urlBrowse, {
-                    method: 'POST',
-                    preferirFetch: true,
-                    headers,
-                    body: JSON.stringify({
-                        context: contextPayload,
-                        continuation: token
-                    })
+                const bodyAuth = JSON.stringify({
+                    context: cfg.fullContext || {
+                        client: {
+                            clientName: 'WEB',
+                            clientVersion: clientVersion || cfg.clientVersion || '2.20260401.01.00',
+                            hl: cfg.hl || 'es',
+                            gl: cfg.gl || 'ES',
+                            ...(cfg.visitorData ? { visitorData: cfg.visitorData } : {})
+                        }
+                    },
+                    continuation: token
                 });
 
-                if (resp.status === 429) hitRateLimit = true;
-                if (resp.status >= 200 && resp.status < 300 && resp.text) {
-                    const data = JSON.parse(resp.text);
-                    const parsed = extraerItemsYContinuacionDePlaylist(data, categoria);
-                    if (parsed.videos.length > 0) {
-                        return parsed;
+                for (const preferirFetch of vias) {
+                    try {
+                        const resp = await peticionHttpBaja(urlBrowse, {
+                            method: 'POST',
+                            preferirFetch,
+                            headers,
+                            body: bodyAuth
+                        });
+                        if (resp.status === 429) hitRateLimit = true;
+                        if (resp.status >= 200 && resp.status < 300 && resp.text) {
+                            const data = JSON.parse(resp.text);
+                            const parsed = extraerItemsYContinuacionDePlaylist(
+                                data.onResponseReceivedActions || data.continuationContents || data,
+                                categoria
+                            );
+                            if (parsed.videos.length > 0) return parsed;
+                            respuestaValida = true;
+                            break;
+                        }
+                    } catch (e) {
+                        if (e.esCancelacion || cancelado) throw e;
+                        ultimoError = e;
                     }
-                    respuestaValida = true;
                 }
             } catch (e) {
-                if (cancelado) throw e;
+                if (e.esCancelacion || cancelado) throw e;
                 ultimoError = e;
             }
 
-            try {
-                const respAnon = await peticionHttpBaja(
-                    'https://www.youtube.com/youtubei/v1/browse?prettyPrint=false',
-                    {
-                        method: 'POST',
-                        preferirFetch: true,
-                        anonymous: true,
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({
-                            context: {
-                                client: {
-                                    clientName: 'WEB',
-                                    clientVersion: clientVersion || '2.20260401.01.00',
-                                    hl: 'es'
-                                }
-                            },
-                            continuation: token
-                        })
+            const bodyAnon = JSON.stringify({
+                context: {
+                    client: {
+                        clientName: 'WEB',
+                        clientVersion: clientVersion || '2.20260401.01.00',
+                        hl: 'es'
                     }
-                );
+                },
+                continuation: token
+            });
 
-                if (respAnon.status === 429) hitRateLimit = true;
-                if (respAnon.status >= 200 && respAnon.status < 300 && respAnon.text) {
-                    const dataAnon = JSON.parse(respAnon.text);
-                    const parsedAnon = extraerItemsYContinuacionDePlaylist(dataAnon, categoria);
-                    if (parsedAnon.videos.length > 0) {
-                        return parsedAnon;
+            for (const preferirFetch of vias) {
+                try {
+                    const respAnon = await peticionHttpBaja(
+                        'https://www.youtube.com/youtubei/v1/browse?prettyPrint=false',
+                        {
+                            method: 'POST',
+                            preferirFetch,
+                            anonymous: true,
+                            headers: { 'Content-Type': 'application/json' },
+                            body: bodyAnon
+                        }
+                    );
+                    if (respAnon.status === 429) hitRateLimit = true;
+                    if (respAnon.status >= 200 && respAnon.status < 300 && respAnon.text) {
+                        const dataAnon = JSON.parse(respAnon.text);
+                        const parsedAnon = extraerItemsYContinuacionDePlaylist(
+                            dataAnon.onResponseReceivedActions || dataAnon.continuationContents || dataAnon,
+                            categoria
+                        );
+                        if (parsedAnon.videos.length > 0) return parsedAnon;
+                        respuestaValida = true;
+                        break;
                     }
-                    respuestaValida = true;
+                } catch (e) {
+                    if (e.esCancelacion || cancelado) throw e;
+                    ultimoError = e;
                 }
-            } catch (e) {
-                if (cancelado) throw e;
-                ultimoError = e;
             }
 
             if (hitRateLimit) {
                 await dormir(2000);
                 continue;
             }
-
             if (respuestaValida) {
                 return { videos: [], tokenContinuacion: null };
             }
@@ -4069,7 +4195,7 @@
             return enDom;
         }
 
-        if (!pc.conteoListo || pc.categoriasDescubiertas.size === 0) {
+        if (!pc.conteoListo || (pc.categoriasDescubiertas.size === 0 && !pc.infoGeneralUU)) {
             progreso(pc, 0, 1, 'Obteniendo información del canal...');
             await descubrirTotalesCanalEnSegundoPlano(pc);
         }
@@ -4116,7 +4242,7 @@
                     token = sig.tokenContinuacion;
                     pagina++;
                 } catch (e) {
-                    if (cancelado || e?.esCancelacion) throw e;
+                    if (e?.esCancelacion || cancelado) throw e;
                     break;
                 }
             }
@@ -4132,7 +4258,8 @@
             }
         }
 
-        if (cola.length < limiteGlobal && pc.infoGeneralUU) {
+        const tieneUulf = (pc.categoriasDescubiertas.get('Videos')?.videos?.length || 0) > 0;
+        if ((cola.length === 0 || !tieneUulf) && cola.length < limiteGlobal && pc.infoGeneralUU) {
             const infoUU = pc.infoGeneralUU;
             let tokenUU = infoUU.tokenContinuacion;
             let paginaUU = 1;
@@ -4143,7 +4270,7 @@
                 vistos.add(v.videoId);
                 cola.push({
                     ...v,
-                    carpeta: v.categoria === 'Shorts' ? 'Shorts' : 'Videos'
+                    carpeta: 'Videos'
                 });
             }
 
@@ -4168,13 +4295,13 @@
                         vistos.add(v.videoId);
                         cola.push({
                             ...v,
-                            carpeta: v.categoria === 'Shorts' ? 'Shorts' : 'Videos'
+                            carpeta: 'Videos'
                         });
                     }
                     tokenUU = sig.tokenContinuacion;
                     paginaUU++;
                 } catch (e) {
-                    if (cancelado || e?.esCancelacion) throw e;
+                    if (e?.esCancelacion || cancelado) throw e;
                     break;
                 }
             }
@@ -4326,7 +4453,7 @@
 
                         pc.log.push(`[OK] ${rutaFinal} (${resTxt.idioma} · ${kb} KB)`);
                     } catch (e) {
-                        if (cancelado) break;
+                        if (e.esCancelacion || cancelado) break;
 
                         if (e.noTieneSubtitulos) {
                             sinSubtitulos++;

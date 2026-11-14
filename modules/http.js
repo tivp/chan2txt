@@ -229,21 +229,6 @@ export function obtenerGmTransporte() {
     return null;
 }
 
-export function esUrlMismoOrigenYoutube(url) {
-    try {
-        if (typeof location !== 'undefined' && /^https?:$/i.test(location.protocol)) {
-            const parsed = new URL(url, location.href);
-            return (
-                parsed.origin === location.origin &&
-                /^https:\/\/(?:www|m)\.youtube\.com$/i.test(parsed.origin)
-            );
-        }
-        return /^https:\/\/(?:www|m)\.youtube\.com(?:\/|$)/i.test(String(url || ''));
-    } catch {
-        return false;
-    }
-}
-
 export function peticionHttpBaja(url, opciones = {}) {
     verificarCancelacion();
 
@@ -256,17 +241,8 @@ export function peticionHttpBaja(url, opciones = {}) {
     const data = opciones.body || opciones.data || undefined;
     const anonymous = Boolean(opciones.anonymous);
     const gm = obtenerGmTransporte();
-    const preferirFetch =
-        opciones.preferirFetch !== undefined
-            ? Boolean(opciones.preferirFetch)
-            : Boolean(
-                  !opciones.forzarGm &&
-                      typeof window !== 'undefined' &&
-                      window.__chan2txtGmPolyfillReady &&
-                      esUrlMismoOrigenYoutube(url)
-              );
 
-    if (gm && !preferirFetch) {
+    if (gm && !opciones.preferirFetch) {
         return new Promise((resolve, reject) => {
             if (cancelado) {
                 const err = new Error('Descarga detenida por el usuario');
@@ -354,16 +330,9 @@ export function peticionHttpBaja(url, opciones = {}) {
             ctrl.abort();
         }, opciones.timeout || CFG.TIMEOUT);
 
-        const headersFetch = {};
-        for (const [k, v] of Object.entries(headers)) {
-            if (!/^(?:user-agent|origin|referer|host)$/i.test(k)) {
-                headersFetch[k] = v;
-            }
-        }
-
         fetchFn.call(win, url, {
             method,
-            headers: headersFetch,
+            headers,
             body: data,
             credentials: anonymous ? 'omit' : 'include',
             cache: 'no-store',
