@@ -1,22 +1,29 @@
-// Detección del canal, conteo por listas (UULF/UUSH/UULV), paginación, marcado de tarjetas y armado de cola.
-
-import { CATEGORIAS, CFG, estado, guardarEnMapaConLimite, verificarCancelacion } from './config.js';
 import {
-    extraerYtInitialDataDeHtml,
-    obtenerSnapshotPagina,
-    seguro,
-    texto
-} from './utils.js';
+    win,
+    CFG,
+    CATEGORIAS,
+    estadoFilas,
+    guardarEnMapaConLimite
+} from './config.js';
+import { texto, seguro, extraerYtInitialDataDeHtml } from './utils.js';
 import { fetchTexto } from './http.js';
+import { progreso } from './ui.js';
+import { verificarCancelacion, descubrirTotalesCanalEnSegundoPlano } from './main.js';
 
-const UC_RE = /^UC[\w-]{22}$/;
+// ==================================================
+// DESCUBRIMIENTO DE CANAL Y CONTEO TOTAL DE VIDEOS (UULF / UUSH / UULV)
+// ==================================================
 
 export function enPantallaDeCanal() {
-    return /^\/(?:@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)(?:\/|$)/i.test(location.pathname);
+    return /^\/(?:@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)(?:\/|$)/i.test(
+        location.pathname
+    );
 }
 
 export function obtenerClaveCanalUrl() {
-    const m = location.pathname.match(/^\/(@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)/i);
+    const m = location.pathname.match(
+        /^\/(@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)/i
+    );
     return m ? m[1].toLowerCase() : '';
 }
 
@@ -28,7 +35,9 @@ export function obtenerNombreCanalDom(initialData = null) {
         return seguro(deJson, 'Canal de YouTube');
     }
 
-    const h1 = document.querySelector('yt-page-header-view-model h1, #channel-name #text, ytd-channel-name #text');
+    const h1 = document.querySelector(
+        'yt-page-header-view-model h1, #channel-name #text, ytd-channel-name #text'
+    );
     if (h1 && texto(h1.textContent)) {
         return seguro(h1.textContent, 'Canal de YouTube');
     }
@@ -37,53 +46,45 @@ export function obtenerNombreCanalDom(initialData = null) {
     return seguro(t, 'Canal de YouTube');
 }
 
-export function resolverChannelIdInstantaneo(snap = null) {
+export const UC_RE = /^UC[\w-]{22}$/;
+
+export function resolverChannelIdInstantaneo() {
     const metaVal = document.querySelector('meta[itemprop="channelId"]')?.getAttribute('content');
     if (metaVal && UC_RE.test(metaVal)) return metaVal;
 
-    const canonicalMatch = (document.querySelector('link[rel="canonical"]')?.getAttribute('href') || '').match(
-        /\/channel\/(UC[\w-]{22})/
-    );
+    const canonicalMatch = (document.querySelector('link[rel="canonical"]')?.getAttribute('href') || '')
+        .match(/\/channel\/(UC[\w-]{22})/);
     if (canonicalMatch?.[1]) return canonicalMatch[1];
 
     const browseNode = document.querySelector('ytd-browse[page-subtype="channels"], ytd-browse');
     const attrId = browseNode?.getAttribute?.('channel-id') || browseNode?.getAttribute?.('external-id');
     if (attrId && UC_RE.test(attrId)) return attrId;
 
-    const canalHref = document.querySelector(
-        'ytd-channel-name a[href*="/channel/UC"], #channel-name a[href*="/channel/UC"], a[href^="/channel/UC"]'
-    );
+    const canalHref = document.querySelector('ytd-channel-name a[href*="/channel/UC"], #channel-name a[href*="/channel/UC"], a[href^="/channel/UC"]');
     const hrefMatch = (canalHref?.getAttribute('href') || '').match(/\/channel\/(UC[\w-]{22})/);
     if (hrefMatch?.[1]) return hrefMatch[1];
 
-    const actual = snap || obtenerSnapshotPagina();
-
     try {
-        const initData = actual?.initData;
+        const initData = win.ytInitialData;
         const deInit =
             initData?.metadata?.channelMetadataRenderer?.externalId ||
             initData?.header?.c4TabbedHeaderRenderer?.channelId;
         if (deInit && UC_RE.test(deInit)) return deInit;
 
-        const rows =
-            initData?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel?.metadata
-                ?.contentMetadataViewModel?.metadataRows || [];
+        const rows = initData?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel
+            ?.metadata?.contentMetadataViewModel?.metadataRows || [];
         for (const row of rows) {
             for (const part of row.metadataParts || []) {
                 const txt = part?.text?.content || '';
                 if (UC_RE.test(txt)) return txt;
             }
         }
-    } catch {
-        // Ignorar si ytInitialData aún no se hidrata en la navegación SPA.
-    }
+    } catch {}
 
     try {
-        const cfgId = actual?.ytcfg?.channelId;
+        const cfgId = win.ytcfg?.get?.('CHANNEL_ID');
         if (cfgId && UC_RE.test(cfgId)) return cfgId;
-    } catch {
-        // Ignorar.
-    }
+    } catch {}
 
     const urlMatch = location.pathname.match(/\/channel\/(UC[\w-]{22})/);
     if (urlMatch?.[1]) return urlMatch[1];
@@ -91,12 +92,10 @@ export function resolverChannelIdInstantaneo(snap = null) {
     return null;
 }
 
-export function obtenerConteoAproximadoHeader(snap = null) {
-    const actual = snap || obtenerSnapshotPagina();
+export function obtenerConteoAproximadoHeader() {
     try {
-        const rows =
-            actual?.initData?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel?.metadata
-                ?.contentMetadataViewModel?.metadataRows || [];
+        const rows = win.ytInitialData?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel
+            ?.metadata?.contentMetadataViewModel?.metadataRows || [];
         for (const fila of rows) {
             for (const parte of fila.metadataParts || []) {
                 const txt = parte?.text?.content || '';
@@ -105,9 +104,7 @@ export function obtenerConteoAproximadoHeader(snap = null) {
                 }
             }
         }
-    } catch {
-        // Seguir al respaldo sobre nodos visibles del encabezado.
-    }
+    } catch {}
 
     const nodos = document.querySelectorAll(
         'yt-page-header-view-model span, ytd-channel-name span, #channel-header span, #meta span'
@@ -123,11 +120,10 @@ export function obtenerConteoAproximadoHeader(snap = null) {
 }
 
 export async function resolverDatosCanalActual() {
-    const snap = obtenerSnapshotPagina();
-    let channelId = resolverChannelIdInstantaneo(snap);
-    let clientVersion = snap?.ytcfg?.clientVersion || '2.20260401.01.00';
-    let nombreCanal = obtenerNombreCanalDom(snap?.initData);
-    let textoTotalHeader = obtenerConteoAproximadoHeader(snap);
+    let channelId = resolverChannelIdInstantaneo();
+    let clientVersion = win.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20260401.01.00';
+    let nombreCanal = obtenerNombreCanalDom(win.ytInitialData);
+    let textoTotalHeader = obtenerConteoAproximadoHeader();
 
     if (channelId && nombreCanal) {
         return {
@@ -159,7 +155,8 @@ export async function resolverDatosCanalActual() {
 
     if ((!clientVersion || clientVersion === '2.20260401.01.00') && htmlCanal) {
         clientVersion =
-            htmlCanal.match(/"INNERTUBE_CLIENT_VERSION"\s*:\s*"([^"]+)"/)?.[1] || clientVersion;
+            htmlCanal.match(/"INNERTUBE_CLIENT_VERSION"\s*:\s*"([^"]+)"/)?.[1] ||
+            clientVersion;
     }
 
     htmlCanal = '';
@@ -171,8 +168,8 @@ export async function resolverDatosCanalActual() {
     if (!textoTotalHeader && initialData) {
         try {
             const filasMeta =
-                initialData?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel?.metadata
-                    ?.contentMetadataViewModel?.metadataRows || [];
+                initialData?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel
+                    ?.metadata?.contentMetadataViewModel?.metadataRows || [];
             for (const fila of filasMeta) {
                 for (const parte of fila.metadataParts || []) {
                     const txt = parte?.text?.content || '';
@@ -181,9 +178,7 @@ export async function resolverDatosCanalActual() {
                     }
                 }
             }
-        } catch {
-            // El canal puede ocultar el total en el encabezado.
-        }
+        } catch {}
     }
 
     return {
@@ -204,7 +199,9 @@ export function parsearConteoPlaylist(data) {
     try {
         const numTxt =
             data?.header?.playlistHeaderRenderer?.numVideosText?.simpleText ||
-            data?.header?.playlistHeaderRenderer?.numVideosText?.runs?.map(r => r.text).join('') ||
+            data?.header?.playlistHeaderRenderer?.numVideosText?.runs
+                ?.map(r => r.text)
+                .join('') ||
             '';
         if (numTxt && !/[kKmM]\b/.test(numTxt)) {
             const n = extraerNumeroEnteroDeTexto(numTxt);
@@ -212,10 +209,13 @@ export function parsearConteoPlaylist(data) {
         }
 
         const stats =
-            data?.sidebar?.playlistSidebarRenderer?.items?.[0]?.playlistSidebarPrimaryInfoRenderer
-                ?.stats;
+            data?.sidebar?.playlistSidebarRenderer?.items?.[0]
+                ?.playlistSidebarPrimaryInfoRenderer?.stats;
         if (Array.isArray(stats) && stats[0]) {
-            const txt = stats[0].simpleText || stats[0].runs?.map(r => r.text).join('') || '';
+            const txt =
+                stats[0].simpleText ||
+                stats[0].runs?.map(r => r.text).join('') ||
+                '';
             if (!/[kKmM]\b/.test(txt)) {
                 const n = extraerNumeroEnteroDeTexto(txt);
                 if (Number.isFinite(n)) return n;
@@ -223,8 +223,8 @@ export function parsearConteoPlaylist(data) {
         }
 
         const rows =
-            data?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel?.metadata
-                ?.contentMetadataViewModel?.metadataRows || [];
+            data?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel
+                ?.metadata?.contentMetadataViewModel?.metadataRows || [];
         for (const r of rows) {
             for (const p of r.metadataParts || []) {
                 const txt = p?.text?.content || '';
@@ -234,9 +234,7 @@ export function parsearConteoPlaylist(data) {
                 }
             }
         }
-    } catch {
-        // Estructuras variables según layout del canal.
-    }
+    } catch {}
     return null;
 }
 
@@ -292,8 +290,14 @@ export function extraerItemsYContinuacionDePlaylist(nodoRaiz, categoria) {
             const slvm = obj.shortsLockupViewModel;
             const url = slvm.onTap?.innertubeCommand?.commandMetadata?.webCommandMetadata?.url || '';
             const mShort = url.match(/\/shorts\/([\w-]{11})/);
-            const videoId = mShort?.[1] || slvm.onTap?.innertubeCommand?.reelWatchEndpoint?.videoId || '';
-            const nombre = slvm.overlayMetadata?.primaryText?.content || slvm.accessibilityText || videoId;
+            const videoId =
+                mShort?.[1] ||
+                slvm.onTap?.innertubeCommand?.reelWatchEndpoint?.videoId ||
+                '';
+            const nombre =
+                slvm.overlayMetadata?.primaryText?.content ||
+                slvm.accessibilityText ||
+                videoId;
             if (videoId) {
                 videos.push({
                     videoId,
@@ -349,7 +353,11 @@ export async function consultarPrimeraPaginaPlaylist(playlistId, categoria) {
             return { conteo: 0, videos: [], tokenContinuacion: null, ok: false };
         }
 
-        const { videos, tokenContinuacion } = extraerItemsYContinuacionDePlaylist(data.contents, categoria);
+        const { videos, tokenContinuacion } = extraerItemsYContinuacionDePlaylist(
+            data.contents,
+            categoria
+        );
+
         const conteoCabecera = parsearConteoPlaylist(data);
         const conteo = Math.max(conteoCabecera || 0, videos.length);
 
@@ -365,22 +373,25 @@ export async function consultarPrimeraPaginaPlaylist(playlistId, categoria) {
 }
 
 export async function cargarContinuacionPlaylist(token, clientVersion, categoria) {
-    const resTxt = await fetchTexto('https://www.youtube.com/youtubei/v1/browse?prettyPrint=false', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            context: {
-                client: {
-                    clientName: 'WEB',
-                    clientVersion: clientVersion || '2.20260401.01.00',
-                    hl: 'es'
-                }
+    const resTxt = await fetchTexto(
+        'https://www.youtube.com/youtubei/v1/browse?prettyPrint=false',
+        {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
             },
-            continuation: token
-        })
-    });
+            body: JSON.stringify({
+                context: {
+                    client: {
+                        clientName: 'WEB',
+                        clientVersion: clientVersion || '2.20260401.01.00',
+                        hl: 'es'
+                    }
+                },
+                continuation: token
+            })
+        }
+    );
 
     const data = JSON.parse(resTxt);
     return extraerItemsYContinuacionDePlaylist(
@@ -419,7 +430,11 @@ export function obtenerVideosEnPantallaDom() {
     for (const a of raiz.querySelectorAll(selectores)) {
         const href = a.getAttribute('href') || '';
         let videoId = '';
-        let categoria = esTabShorts ? 'Shorts' : esTabStreams ? 'En vivo' : 'Videos';
+        let categoria = esTabShorts
+            ? 'Shorts'
+            : esTabStreams
+              ? 'En vivo'
+              : 'Videos';
 
         const mWatch = href.match(/[?&]v=([\w-]{11})/);
         const mShorts = href.match(/\/shorts\/([\w-]{11})/);
@@ -445,8 +460,8 @@ export function obtenerVideosEnPantallaDom() {
         const nombre =
             texto(
                 tituloNodo?.getAttribute?.('title') ||
-                    tituloNodo?.getAttribute?.('aria-label') ||
-                    tituloNodo?.textContent
+                tituloNodo?.getAttribute?.('aria-label') ||
+                tituloNodo?.textContent
             ) || videoId;
 
         vistos.add(videoId);
@@ -460,6 +475,10 @@ export function obtenerVideosEnPantallaDom() {
     return lista;
 }
 
+// ==================================================
+// COLOREADO DE TARJETAS DE VIDEO EN LA CUADRÍCULA DEL CANAL
+// ==================================================
+
 export function buscarTarjetaVideoDom(videoId) {
     if (!videoId) return null;
     const raiz = obtenerRaizCanalDom();
@@ -471,9 +490,9 @@ export function buscarTarjetaVideoDom(videoId) {
     );
 }
 
-export function colorearVideoDom(videoId, estadoFila, detalle) {
+export function colorearVideoDom(videoId, estado, detalle) {
     if (!videoId) return;
-    guardarEnMapaConLimite(estado.estadoFilas, videoId, { estado: estadoFila, detalle }, 500);
+    guardarEnMapaConLimite(estadoFilas, videoId, { estado, detalle }, 500);
 
     const card = buscarTarjetaVideoDom(videoId);
     if (!card) return;
@@ -484,12 +503,12 @@ export function colorearVideoDom(videoId, estadoFila, detalle) {
         'maximus-fila-omitido',
         'maximus-fila-sin-subtitulos'
     );
-    card.classList.add(`maximus-fila-${estadoFila}`);
+    card.classList.add(`maximus-fila-${estado}`);
     card.title = detalle;
 }
 
 export function restaurarColoresVideosDom() {
-    for (const [videoId, info] of estado.estadoFilas.entries()) {
+    for (const [videoId, info] of estadoFilas.entries()) {
         const card = buscarTarjetaVideoDom(videoId);
         if (card) {
             card.classList.remove(
@@ -504,7 +523,11 @@ export function restaurarColoresVideosDom() {
     }
 }
 
-export async function construirColaVideos(pc, onProgreso, onDescubrir) {
+// ==================================================
+// RECOLECCIÓN COMPLETA DE LA COLA DE VIDEOS SEGÚN EL MODO ELEGIDO
+// ==================================================
+
+export async function construirColaVideos(pc) {
     if (pc.modo === 'pantalla') {
         const enDom = obtenerVideosEnPantallaDom();
         if (!enDom.length) {
@@ -513,9 +536,9 @@ export async function construirColaVideos(pc, onProgreso, onDescubrir) {
         return enDom;
     }
 
-    if (!pc.conteoListo && typeof onDescubrir === 'function') {
-        onProgreso?.(pc, 0, 1, 'Obteniendo información del canal...');
-        await onDescubrir(pc);
+    if (!pc.conteoListo) {
+        progreso(pc, 0, 1, 'Obteniendo información del canal...');
+        await descubrirTotalesCanalEnSegundoPlano(pc);
     }
 
     const limiteGlobal =
@@ -536,9 +559,13 @@ export async function construirColaVideos(pc, onProgreso, onDescubrir) {
         let token = infoCat.tokenContinuacion;
         let pagina = 1;
 
-        while (token && cola.length + listaCat.length < limiteGlobal && pagina < 100) {
+        while (
+            token &&
+            cola.length + listaCat.length < limiteGlobal &&
+            pagina < 100
+        ) {
             verificarCancelacion();
-            onProgreso?.(
+            progreso(
                 pc,
                 listaCat.length,
                 infoCat.conteo || listaCat.length + 100,
@@ -546,7 +573,11 @@ export async function construirColaVideos(pc, onProgreso, onDescubrir) {
             );
 
             try {
-                const sig = await cargarContinuacionPlaylist(token, pc.clientVersion, cat.clave);
+                const sig = await cargarContinuacionPlaylist(
+                    token,
+                    pc.clientVersion,
+                    cat.clave
+                );
                 if (!sig.videos.length) break;
                 listaCat.push(...sig.videos);
                 token = sig.tokenContinuacion;
@@ -584,14 +615,18 @@ export async function construirColaVideos(pc, onProgreso, onDescubrir) {
 
         while (tokenUU && cola.length < limiteGlobal && paginaUU < 100) {
             verificarCancelacion();
-            onProgreso?.(
+            progreso(
                 pc,
                 cola.length,
                 pc.totalExactoCanal || cola.length + 100,
                 `Listando videos del canal (${cola.length}/${pc.totalExactoCanal || '?'})...`
             );
             try {
-                const sig = await cargarContinuacionPlaylist(tokenUU, pc.clientVersion, 'Videos');
+                const sig = await cargarContinuacionPlaylist(
+                    tokenUU,
+                    pc.clientVersion,
+                    'Videos'
+                );
                 if (!sig.videos.length) break;
                 for (const v of sig.videos) {
                     if (cola.length >= limiteGlobal) break;

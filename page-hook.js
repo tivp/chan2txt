@@ -1,4 +1,4 @@
-// Corre en el mundo MAIN para interceptar timedtext/get_transcript y exponer ytcfg, ytInitialData y #movie_player.
+// Provee GM_xmlhttpRequest, GM_setClipboard, GM_notification, GM_getValue y GM_setValue en el mundo MAIN.
 
 (() => {
     'use strict';
@@ -10,235 +10,180 @@
         return;
     }
 
-    if (window.__chan2txtPageHookReady) {
+    if (window.__chan2txtGmPolyfillReady) {
         return;
     }
-    window.__chan2txtPageHookReady = true;
+    window.__chan2txtGmPolyfillReady = true;
 
-    if (document.documentElement) {
-        document.documentElement.dataset.chan2txtPageHook = '1';
-    }
+    let reqSeq = 0;
+    const memStore = new Map();
+    const callbacksNotif = new Map();
 
-    const POT_PARAMS = [
-        'pot', 'potc', 'c', 'cver', 'cplayer', 'cos', 'cosver',
-        'cplatform', 'cbr', 'cbrver', 'xorb', 'xobt', 'xovt'
-    ];
-
-    function emitirTimedtextPot(rawUrl) {
-        try {
-            if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.includes('/api/timedtext')) return;
-            const u = new URL(rawUrl, 'https://www.youtube.com');
-            const videoId = u.searchParams.get('v');
-            const pot = u.searchParams.get('pot');
-            if (!pot) return;
-
-            const collected = {};
-            for (const name of POT_PARAMS) {
-                const val = u.searchParams.get(name);
-                if (val !== null && val !== '') collected[name] = val;
-            }
-
-            const msg = {
-                type: 'MAXIMUS_POT_CAPTURED',
-                videoId,
-                potParams: collected
-            };
-            window.postMessage(msg, '*');
-            if (esIframeTrabajador && window.parent && window.parent !== window) {
-                window.parent.postMessage(msg, '*');
-            }
-        } catch {
-            // Ignorar URLs inválidas.
-        }
-    }
-
-    function emitirCuerpoSubtitulo(rawUrl, bodyText) {
-        try {
-            if (!rawUrl || typeof rawUrl !== 'string') return;
-            if (typeof bodyText !== 'string' || bodyText.trim().length < 15 || bodyText.length > 2500000) return;
-
-            if (rawUrl.includes('/api/timedtext')) {
-                const u = new URL(rawUrl, 'https://www.youtube.com');
-                const videoId = u.searchParams.get('v');
-                if (!videoId) return;
-
-                const msg = {
-                    type: 'MAXIMUS_SUBTITLE_CAPTURED',
-                    videoId,
-                    rawPayload: bodyText
-                };
-                window.postMessage(msg, '*');
-                if (esIframeTrabajador && window.parent && window.parent !== window) {
-                    window.parent.postMessage(msg, '*');
-                }
-            } else if (rawUrl.includes('/youtubei/v1/get_transcript')) {
-                const vidActual = new URLSearchParams(location.search).get('v') || '';
-                if (
-                    vidActual &&
-                    (bodyText.includes('transcriptSegment') || bodyText.includes('macroMarkersPanelItem'))
-                ) {
-                    const msg = {
-                        type: 'MAXIMUS_TRANSCRIPT_JSON_CAPTURED',
-                        videoId: vidActual,
-                        rawTranscriptJson: bodyText
-                    };
-                    window.postMessage(msg, '*');
-                    if (esIframeTrabajador && window.parent && window.parent !== window) {
-                        window.parent.postMessage(msg, '*');
-                    }
-                }
-            }
-        } catch {
-            // Ignorar errores al clonar cuerpos no textuales.
-        }
-    }
-
-    try {
-        const origFetch = window.fetch;
-        if (typeof origFetch === 'function') {
-            window.fetch = function (...args) {
-                try {
-                    const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
-                    if (
-                        url &&
-                        typeof url === 'string' &&
-                        (url.includes('/api/timedtext') || url.includes('/youtubei/v1/get_transcript'))
-                    ) {
-                        if (url.includes('/api/timedtext')) emitirTimedtextPot(url);
-                        const p = origFetch.apply(this, args);
-                        p.then(res => {
-                            if (res && res.ok) {
-                                res
-                                    .clone()
-                                    .text()
-                                    .then(b => emitirCuerpoSubtitulo(url, b))
-                                    .catch(() => {});
-                            }
-                        }).catch(() => {});
-                        return p;
-                    }
-                } catch {
-                    // Continuar con fetch original.
-                }
-                return origFetch.apply(this, args);
-            };
-        }
-
-        const xhrProto = window.XMLHttpRequest?.prototype;
-        if (xhrProto && typeof xhrProto.open === 'function') {
-            const origOpen = xhrProto.open;
-            xhrProto.open = function (...args) {
-                try {
-                    const url = args[1];
-                    if (
-                        url &&
-                        typeof url === 'string' &&
-                        (url.includes('/api/timedtext') || url.includes('/youtubei/v1/get_transcript'))
-                    ) {
-                        if (url.includes('/api/timedtext')) emitirTimedtextPot(url);
-                        this.addEventListener(
-                            'loadend',
-                            function () {
-                                try {
-                                    if (this.status === 200 && typeof this.responseText === 'string') {
-                                        emitirCuerpoSubtitulo(url, this.responseText);
-                                    }
-                                } catch {
-                                    // Ignorar respuestas binarias.
-                                }
-                            },
-                            { once: true }
-                        );
-                    }
-                } catch {
-                    // No interferir con peticiones de YouTube.
-                }
-                return origOpen.apply(this, args);
-            };
-        }
-    } catch {
-        // Entorno donde no se permite reasignar fetch/XHR.
-    }
-
-    function leerYtcfgSeguro() {
-        const get = k => {
+    window.addEventListener('maximus-bridge-notify-clicked', e => {
+        const notifId = e.detail?.notifId;
+        if (!notifId) return;
+        const fn = callbacksNotif.get(notifId);
+        callbacksNotif.delete(notifId);
+        if (typeof fn === 'function') {
             try {
-                return window.ytcfg?.get?.(k) ?? window.ytcfg?.data_?.[k];
+                fn();
             } catch {
-                return undefined;
+                // Ignorar errores dentro del callback onclick de la notificación.
             }
-        };
-        const ctx = get('INNERTUBE_CONTEXT') || null;
-        return {
-            apiKey: get('INNERTUBE_API_KEY') || '',
-            clientVersion: get('INNERTUBE_CLIENT_VERSION') || ctx?.client?.clientVersion || '2.20260401.01.00',
-            clientName: get('INNERTUBE_CONTEXT_CLIENT_NAME') || 1,
-            visitorData: get('VISITOR_DATA') || ctx?.client?.visitorData || '',
-            sessionIndex: String(get('SESSION_INDEX') ?? '0'),
-            delegatedSessionId: get('DELEGATED_SESSION_ID') || '',
-            sts: get('STS') || null,
-            channelId: get('CHANNEL_ID') || '',
-            fullContext: ctx
-        };
-    }
-
-    // Responde de forma síncrona a los módulos que corren en ISOLATED o USER_SCRIPT.
-    window.addEventListener('chan2txt-req', ev => {
-        let req = null;
-        try {
-            req = typeof ev.detail === 'string' ? JSON.parse(ev.detail) : ev.detail;
-        } catch {
-            return;
         }
-        if (!req?.reqId || !req?.accion) return;
-
-        let resultado = null;
-
-        if (req.accion === 'GET_SNAPSHOT') {
-            const player = document.getElementById('movie_player');
-            let pr = null;
-            try {
-                pr = player?.getPlayerResponse?.() || window.ytInitialPlayerResponse || null;
-            } catch {
-                pr = window.ytInitialPlayerResponse || null;
-            }
-            const initData = window.ytInitialData || null;
-            resultado = {
-                ytcfg: leerYtcfgSeguro(),
-                pr,
-                initData
-            };
-        } else if (req.accion === 'ACTIVATE_CAPTIONS') {
-            const player = document.getElementById('movie_player');
-            let tracklist = [];
-            if (player) {
-                try {
-                    if (req.silenciar) player.mute?.();
-                    player.loadModule?.('captions');
-                    player.loadModule?.('cc');
-                    tracklist = player.getOption?.('captions', 'tracklist') || [];
-                    const trackEsp = tracklist.find(t => /^es/i.test(t.languageCode)) || tracklist[0];
-                    if (trackEsp) {
-                        player.setOption?.('captions', 'track', trackEsp);
-                    }
-                } catch {
-                    tracklist = [];
-                }
-            }
-            resultado = { tracklist };
-        }
-
-        let serializado = 'null';
-        try {
-            serializado = JSON.stringify(resultado);
-        } catch {
-            serializado = JSON.stringify({ ytcfg: leerYtcfgSeguro(), pr: null, initData: null });
-        }
-
-        window.dispatchEvent(
-            new CustomEvent(`chan2txt-res-${req.reqId}`, {
-                detail: serializado
-            })
-        );
     });
+
+    if (typeof window.GM_xmlhttpRequest !== 'function') {
+        window.GM_xmlhttpRequest = function (detalles) {
+            const opts = detalles || {};
+            const requestId = `gm_${++reqSeq}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+            const eventName = `maximus-bridge-res-${requestId}`;
+            let terminado = false;
+            let timer = null;
+
+            const limpiar = () => {
+                clearTimeout(timer);
+                window.removeEventListener(eventName, onResp);
+            };
+
+            const onResp = ev => {
+                if (terminado) return;
+                terminado = true;
+                limpiar();
+
+                const payload = ev.detail || {};
+                if (payload.error) {
+                    if (/tiempo agotado/i.test(payload.error) && typeof opts.ontimeout === 'function') {
+                        opts.ontimeout();
+                    } else if (typeof opts.onerror === 'function') {
+                        opts.onerror(payload);
+                    }
+                    return;
+                }
+
+                if (typeof opts.onload === 'function') {
+                    opts.onload({
+                        status: payload.status ?? 0,
+                        responseText: payload.text ?? '',
+                        finalUrl: payload.finalUrl || opts.url
+                    });
+                }
+            };
+
+            window.addEventListener(eventName, onResp);
+
+            const timeoutMs = Number(opts.timeout) || 16000;
+            timer = setTimeout(() => {
+                if (terminado) return;
+                terminado = true;
+                limpiar();
+                window.dispatchEvent(new CustomEvent('maximus-bridge-abort', { detail: { requestId } }));
+                if (typeof opts.ontimeout === 'function') {
+                    opts.ontimeout();
+                }
+            }, timeoutMs + 500);
+
+            window.dispatchEvent(
+                new CustomEvent('maximus-bridge-http', {
+                    detail: {
+                        requestId,
+                        url: opts.url,
+                        method: opts.method || 'GET',
+                        headers: opts.headers ? { ...opts.headers } : {},
+                        body: opts.data,
+                        anonymous: Boolean(opts.anonymous),
+                        timeout: timeoutMs
+                    }
+                })
+            );
+
+            return {
+                abort() {
+                    if (terminado) return;
+                    terminado = true;
+                    limpiar();
+                    window.dispatchEvent(new CustomEvent('maximus-bridge-abort', { detail: { requestId } }));
+                    if (typeof opts.onabort === 'function') {
+                        opts.onabort();
+                    }
+                }
+            };
+        };
+    }
+
+    if (typeof window.GM_setClipboard !== 'function') {
+        window.GM_setClipboard = function (texto) {
+            const val = String(texto ?? '');
+            const copiarFallback = () => {
+                try {
+                    const ta = document.createElement('textarea');
+                    ta.value = val;
+                    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none;';
+                    (document.body || document.documentElement).appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    ta.remove();
+                } catch {
+                    // Ignorar si el navegador bloquea el copiado sin gesto activo.
+                }
+            };
+
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                navigator.clipboard.writeText(val).catch(copiarFallback);
+            } else {
+                copiarFallback();
+            }
+        };
+    }
+
+    if (typeof window.GM_notification !== 'function') {
+        window.GM_notification = function (detallesOtexto, tituloOpcional) {
+            const obj =
+                detallesOtexto && typeof detallesOtexto === 'object'
+                    ? detallesOtexto
+                    : {
+                          text: String(detallesOtexto ?? ''),
+                          title: tituloOpcional || 'Canal de YouTube a TXT'
+                      };
+
+            const notifId = `notif_${++reqSeq}_${Date.now()}`;
+            if (typeof obj.onclick === 'function') {
+                callbacksNotif.set(notifId, obj.onclick);
+            }
+
+            window.dispatchEvent(
+                new CustomEvent('maximus-bridge-notify', {
+                    detail: {
+                        notifId,
+                        title: obj.title || 'Canal de YouTube a TXT',
+                        message: obj.text || '',
+                        url: obj.url || ''
+                    }
+                })
+            );
+        };
+    }
+
+    if (typeof window.GM_getValue !== 'function') {
+        window.GM_getValue = function (clave, defecto) {
+            try {
+                const raw = localStorage.getItem(`chan2txt_gm_${clave}`);
+                if (raw !== null) return JSON.parse(raw);
+            } catch {
+                // Respaldo en memoria si localStorage no está disponible.
+            }
+            return memStore.has(clave) ? memStore.get(clave) : defecto;
+        };
+    }
+
+    if (typeof window.GM_setValue !== 'function') {
+        window.GM_setValue = function (clave, valor) {
+            memStore.set(clave, valor);
+            try {
+                localStorage.setItem(`chan2txt_gm_${clave}`, JSON.stringify(valor));
+            } catch {
+                // Ignorar error de cuota o almacenamiento privado.
+            }
+        };
+    }
 })();

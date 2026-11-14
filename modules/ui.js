@@ -1,43 +1,10 @@
-// Estilos CSS, barra de progreso por bloques, botones con logo en Base64 y puntos de anclaje en YouTube.
+import { obtenerRaizCanalDom } from './channel.js';
 
-import { LOGO_BASE64 } from './config.js';
-import { crearElemento } from './utils.js';
+// ==================================================
+// CSS (ESTÉTICA MAXIMUS ORDEN + AZUL PARA VIDEOS SIN SUBTÍTULOS)
+// ==================================================
 
-export function crearLogoNodo() {
-    return crearElemento('img', {
-        className: 'maximus-logo',
-        src: LOGO_BASE64,
-        alt: ''
-    });
-}
-
-export function crearBotonConLogo(props, etiquetaInicial) {
-    const spanTexto = crearElemento('span', {
-        className: 'maximus-boton-texto',
-        textContent: etiquetaInicial
-    });
-    return crearElemento('button', props, [crearLogoNodo(), spanTexto]);
-}
-
-export function cambiarTextoBoton(boton, etiqueta) {
-    if (!boton) return;
-    let span = boton.querySelector('.maximus-boton-texto');
-    if (!span) {
-        boton.textContent = '';
-        boton.appendChild(crearLogoNodo());
-        span = crearElemento('span', { className: 'maximus-boton-texto' });
-        boton.appendChild(span);
-    }
-    span.textContent = etiqueta;
-}
-
-export function obtenerTextoBoton(boton) {
-    if (!boton) return '';
-    const span = boton.querySelector('.maximus-boton-texto');
-    return span ? span.textContent : boton.textContent;
-}
-
-export function inyectarCss() {
+export function css() {
     let style = document.getElementById('maximus-yt-css');
     if (!style) {
         style = document.createElement('style');
@@ -89,11 +56,7 @@ export function inyectarCss() {
         }
 
         .maximus-boton {
-            display: inline-flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            gap: 6px !important;
-            padding: 0 11px !important;
+            padding: 0 12px !important;
             background: #fff !important;
             border: 1px solid #718399 !important;
             border-radius: 4px !important;
@@ -102,21 +65,6 @@ export function inyectarCss() {
             cursor: pointer !important;
             font: 600 12px Arial, sans-serif !important;
             transition: background-color .15s, border-color .15s, color .15s;
-        }
-
-        .maximus-logo {
-            width: 16px !important;
-            height: 16px !important;
-            flex: 0 0 16px !important;
-            object-fit: contain !important;
-            pointer-events: none !important;
-            opacity: .9;
-        }
-
-        html[dark] .maximus-logo,
-        html[darker-dark-theme] .maximus-logo,
-        [dark] .maximus-logo {
-            filter: invert(1);
         }
 
         html[dark] .maximus-boton {
@@ -443,6 +391,10 @@ export function inyectarCss() {
     `;
 }
 
+// ==================================================
+// BARRA TIPO TORRENT / SEEDER
+// ==================================================
+
 export function progreso(pc, n, total, mensaje) {
     if (!pc?.pct || !pc?.estado) return;
     const pctNum = total ? Math.round((n / total) * 100) : 0;
@@ -467,7 +419,7 @@ export function crearPiezas(pc, items) {
     }
 }
 
-export function pieza(pc, i, estadoPieza, nombre, detalle = '') {
+export function pieza(pc, i, estado, nombre, detalle = '') {
     if (!pc?.piezas?.length) return;
     const total = pc.totalItemsBarra || pc.piezas.length;
     const idxVisual = Math.min(
@@ -476,39 +428,43 @@ export function pieza(pc, i, estadoPieza, nombre, detalle = '') {
     );
     const nodo = pc.piezas[idxVisual];
     if (!nodo) return;
-    nodo.className = `maximus-pieza ${estadoPieza}`;
-    nodo.title = `${i + 1}. ${nombre}: ${detalle || estadoPieza}`;
+    nodo.className = `maximus-pieza ${estado}`;
+    nodo.title = `${i + 1}. ${nombre}: ${detalle || estado}`;
 }
 
-export function buscarAnclaDebajoSuscribirse(raiz) {
-    const scope = raiz || document;
+// ==================================================
+// MONTAJE DE LA CAJITA DEBAJO DEL BOTÓN DE SUSCRIBIRSE
+// ==================================================
 
-    const accionesHeader = scope.querySelector(
+export function buscarAnclaDebajoSuscribirse() {
+    const raiz = obtenerRaizCanalDom();
+
+    const accionesHeader = raiz.querySelector(
         'yt-page-header-view-model yt-flexible-actions-view-model, ' +
-            'yt-page-header-view-model .ytPageHeaderViewModelFlexibleActions, ' +
-            'yt-page-header-view-model .ytFlexibleActionsViewModelHost, ' +
-            'yt-page-header-renderer yt-flexible-actions-view-model, ' +
-            '#page-header yt-flexible-actions-view-model, ' +
-            '#page-header .ytPageHeaderViewModelFlexibleActions, ' +
-            '#page-header .ytFlexibleActionsViewModelHost'
+        'yt-page-header-view-model .ytPageHeaderViewModelFlexibleActions, ' +
+        'yt-page-header-view-model .ytFlexibleActionsViewModelHost, ' +
+        'yt-page-header-renderer yt-flexible-actions-view-model, ' +
+        '#page-header yt-flexible-actions-view-model, ' +
+        '#page-header .ytPageHeaderViewModelFlexibleActions, ' +
+        '#page-header .ytFlexibleActionsViewModelHost'
     );
     if (accionesHeader?.parentElement) {
         return { contenedor: accionesHeader.parentElement, referenciaDespuesDe: accionesHeader };
     }
 
-    const infoHeader = scope.querySelector(
+    const infoHeader = raiz.querySelector(
         '.ytPageHeaderViewModelHeadlineInfo, ' +
-            '.yt-page-header-view-model__page-header-headline-info, ' +
-            '.page-header-view-model-wiz__page-header-headline-info, ' +
-            'yt-page-header-view-model .ytPageHeaderViewModelContent, ' +
-            'yt-page-header-view-model, ' +
-            '#page-header'
+        '.yt-page-header-view-model__page-header-headline-info, ' +
+        '.page-header-view-model-wiz__page-header-headline-info, ' +
+        'yt-page-header-view-model .ytPageHeaderViewModelContent, ' +
+        'yt-page-header-view-model, ' +
+        '#page-header'
     );
     if (infoHeader) {
         return { contenedor: infoHeader, referenciaDespuesDe: null };
     }
 
-    const clasico = scope.querySelector('#inner-header-container, #channel-header-container');
+    const clasico = raiz.querySelector('#inner-header-container, #channel-header-container');
     if (clasico) {
         return { contenedor: clasico, referenciaDespuesDe: null };
     }

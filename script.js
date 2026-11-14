@@ -22,13 +22,13 @@
 (() => {
     'use strict';
 
-    // --- Módulo 1: Configuración, constantes, logo Base64 y estado compartido ---
+    const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const esIframe = typeof window !== 'undefined' && window.top !== window.self;
+    const esIframeTrabajador = esIframe && location.search.includes('maximus_worker=1');
 
-    // Configuración general, clientes Innertube y estado compartido entre módulos.
-
-    // Logo de Transformer vectorizado en Base64 a partir de Transfomer Logo.svg.
-    const LOGO_BASE64 =
-        'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjIyMCAxOTAgNTUyIDU0MiI+PHBvbHlnb24gcG9pbnRzPSIzNzAuNyw1MDYuOSAzNzAuMyw1MDYuNyAzMzEuNSw0NzguNyAzMzEuMyw0NTMuNyAyNzguMyw0MTUuMSAyOTMsNjA3LjIgMzcwLjcsNjczIi8+PHBvbHlnb24gcG9pbnRzPSI1NDYsNDc5IDU0Niw2MDcuNiA0NDYuMSw2MDcuNiA0NDYuMSw0NzguNCAzOTAuNyw1MDcuMSAzOTAuNyw2ODkuOSA0MTUuNiw3MTEgNDQ1LjksNjM4LjkgNTQ1LjMsNjM4LjkgNTc1LjgsNzExIDYwMC44LDY4NyA2MDAuOCw1MDcuNCIvPjxwb2x5Z29uIHBvaW50cz0iNDMxLjUsNzIxLjcgNTU5LjUsNzIxLjcgNTMzLjksNjU3IDQ1Ny41LDY1NyIvPjxwb2x5Z29uIHBvaW50cz0iNjIwLjYsNjczLjcgNjIwLjYsNTA2LjIgNjU5LjksNDc4LjQgNjU5LjksNDU0LjQgNzEyLjUsNDE2LjEgNjk4LjEsNjA3LjIiLz48cG9seWdvbiBwb2ludHM9IjQ2Mi42LDU4OC45IDQ2Mi42LDQ2MC42IDQ0Ny43LDM2NS45IDQ5NS44LDQwMC4zIDU0Mi42LDM2NS45IDUyOS4xLDQ2MS40IDUyOS4xLDU4OC45Ii8+PHBhdGggZD0iTTQyNy45LDM1NC4xbC0xMDEtNjYuM2wtMTEuNS01Mi43bC04My43LTYuM2wzNC42LDE1Nmw4MC40LDU4LjdsOTguMiwxNS41TDQyNy45LDM1NC4xeiBNMjc2LjMsMjgzLjdsMTE3LjgsNzguNWwyLjUsMTYuNmwtMTE2LjItNzcuM0wyNzYuMywyODMuN3ogTTI4OS4xLDM0N2wtNC4xLTE3LjhsMTE3LjgsNzguNWwyLjUsMTYuNkwyODkuMSwzNDd6Ii8+PHBhdGggZD0iTTU0Ni42LDQ1OS4xbDk4LjItMTUuNWw4MC40LTU4LjdsMzQuNi0xNTZsLTgzLjcsNi4zbC0xMS41LDUyLjdsLTEwMSw2Ni4zTDU0Ni42LDQ1OS4xeiBNNzExLDMwMS41bC0xMTYuMiw3Ny4zbDIuNS0xNi42bDExNy44LTc4LjVMNzExLDMwMS41eiBNNTg2LjEsNDI0LjJsMi41LTE2LjZsMTE3LjgtNzguNWwtNC4xLDE3LjhMNTg2LjEsNDI0LjJ6Ii8+PHBhdGggZD0iTTQ5NS4yLDIwMS4zYy05NiwwLTE1OS4xLDMzLjQtMTU5LjEsMzMuNGw4LjYsNDMuM2wxNTAuNSw5OS40bDE1MS4zLTk5LjFsOC42LTQyLjhDNjU1LjEsMjM1LjQsNTkxLjIsMjAxLjMsNDk1LjIsMjAxLjN6IE00OTYsMzE3LjFsLTg2LjktNTcuOWgxNzIuN0w0OTYsMzE3LjF6Ii8+PC9zdmc+';
+    if (esIframe && !esIframeTrabajador) {
+        return;
+    }
 
     const CFG = Object.freeze({
         CONCURRENCIA: 6,
@@ -50,7 +50,6 @@
         { clave: 'En vivo', prefijo: 'UULV', carpeta: 'En vivo' }
     ]);
 
-    // Clientes alternativos de Innertube; varios devuelven pistas timedtext sin pedir token POT de navegador.
     const CLIENTES_INNERTUBE = Object.freeze([
         {
             nombre: 'ANDROID',
@@ -95,7 +94,7 @@
         {
             nombre: 'WEB_EMBEDDED_PLAYER',
             id: '56',
-            ua: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+            ua: navigator.userAgent,
             context: {
                 clientName: 'WEB_EMBEDDED_PLAYER',
                 clientVersion: '1.20260401.01.00',
@@ -105,40 +104,19 @@
         }
     ]);
 
-    const POT_CARRIED_PARAM_NAMES = Object.freeze([
+    // ==================================================
+    // INTERCEPTACIÓN EN VIVO DE SUBTÍTULOS, GET_TRANSCRIPT Y TOKENS POT
+    // ==================================================
+    const _potCarriedParamNames = [
         'pot', 'potc', 'c', 'cver', 'cplayer', 'cos', 'cosver',
         'cplatform', 'cbr', 'cbrver', 'xorb', 'xobt', 'xovt'
-    ]);
+    ];
+    const _potParamsByVideoId = new Map();
+    const _subtitulosCachePorVideoId = new Map();
+    const _transcriptJsonPorVideoId = new Map();
+    let _potLatestParams = null;
+    let _potHooksInstalled = false;
 
-    const winRef = typeof unsafeWindow !== 'undefined' ? unsafeWindow : (typeof window !== 'undefined' ? window : null);
-    const enIframe = typeof window !== 'undefined' && window.top !== window.self;
-    const enIframeTrabajador = enIframe && location.search.includes('maximus_worker=1');
-
-    const estado = {
-        win: winRef,
-        esIframe: enIframe,
-        esIframeTrabajador: enIframeTrabajador,
-        potParamsByVideoId: new Map(),
-        subtitulosCachePorVideoId: new Map(),
-        transcriptJsonPorVideoId: new Map(),
-        potLatestParams: null,
-        potHooksInstalled: false,
-        estadoFilas: new Map(),
-        abortadoresActivos: new Set(),
-        callbacksWorkersIframe: new Map(),
-        iframesActivosSet: new Set(),
-        panelCanal: null,
-        ocupado: false,
-        cancelado: false,
-        pendiente: false,
-        seqDescubrimiento: 0,
-        iframesEnCurso: 0,
-        enPausaPorCaptcha: false,
-        resolverCaptchaFn: null,
-        urlCaptchaActivo: ''
-    };
-
-    // Inserta al final para mantener comportamiento LRU simple y acotar uso de memoria.
     function guardarEnMapaConLimite(mapa, clave, valor, maxItems = CFG.MAX_CACHE) {
         if (!clave) return;
         if (mapa.has(clave)) mapa.delete(clave);
@@ -150,18 +128,719 @@
         }
     }
 
+    function _rememberPotFromTimedtextUrl(rawUrl) {
+        try {
+            if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.includes('/api/timedtext')) return;
+            const u = new URL(rawUrl, 'https://www.youtube.com');
+            const videoId = u.searchParams.get('v');
+            const pot = u.searchParams.get('pot');
+            if (pot) {
+                const collected = {};
+                for (const name of _potCarriedParamNames) {
+                    const val = u.searchParams.get(name);
+                    if (val !== null && val !== '') collected[name] = val;
+                }
+                _potLatestParams = collected;
+                if (videoId) {
+                    guardarEnMapaConLimite(_potParamsByVideoId, videoId, collected, 80);
+                }
+                if (esIframeTrabajador && window.parent && window.parent !== window) {
+                    try {
+                        window.parent.postMessage({
+                            type: 'MAXIMUS_POT_CAPTURED',
+                            videoId,
+                            potParams: collected
+                        }, '*');
+                    } catch {}
+                }
+            }
+        } catch {}
+    }
+
+    function _rememberSubtitleBody(rawUrl, bodyText) {
+        try {
+            if (!rawUrl || typeof rawUrl !== 'string') return;
+            if (typeof bodyText !== 'string' || bodyText.trim().length < 15 || bodyText.length > 2500000) return;
+
+            if (rawUrl.includes('/api/timedtext')) {
+                const u = new URL(rawUrl, 'https://www.youtube.com');
+                const videoId = u.searchParams.get('v');
+                if (videoId) {
+                    guardarEnMapaConLimite(_subtitulosCachePorVideoId, videoId, bodyText, 50);
+                    if (esIframeTrabajador && window.parent && window.parent !== window) {
+                        try {
+                            window.parent.postMessage({
+                                type: 'MAXIMUS_SUBTITLE_CAPTURED',
+                                videoId,
+                                rawPayload: bodyText
+                            }, '*');
+                        } catch {}
+                    }
+                }
+            } else if (rawUrl.includes('/youtubei/v1/get_transcript')) {
+                const vidActual = new URLSearchParams(location.search).get('v') || '';
+                if (vidActual && (bodyText.includes('transcriptSegment') || bodyText.includes('macroMarkersPanelItem'))) {
+                    guardarEnMapaConLimite(_transcriptJsonPorVideoId, vidActual, bodyText, 50);
+                    if (esIframeTrabajador && window.parent && window.parent !== window) {
+                        try {
+                            window.parent.postMessage({
+                                type: 'MAXIMUS_TRANSCRIPT_JSON_CAPTURED',
+                                videoId: vidActual,
+                                rawTranscriptJson: bodyText
+                            }, '*');
+                        } catch {}
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    function _installPotHooksOnce() {
+        if (_potHooksInstalled) return;
+        if (!win) return;
+        try {
+            const origFetch = win.fetch;
+            if (typeof origFetch === 'function') {
+                win.fetch = function (...args) {
+                    try {
+                        const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
+                        if (url && typeof url === 'string' && (url.includes('/api/timedtext') || url.includes('/youtubei/v1/get_transcript'))) {
+                            if (url.includes('/api/timedtext')) _rememberPotFromTimedtextUrl(url);
+                            const p = origFetch.apply(this, args);
+                            p.then(res => {
+                                if (res && res.ok) {
+                                    res.clone().text().then(b => _rememberSubtitleBody(url, b)).catch(() => {});
+                                }
+                            }).catch(() => {});
+                            return p;
+                        }
+                    } catch {}
+                    return origFetch.apply(this, args);
+                };
+            }
+            const xhrProto = win.XMLHttpRequest?.prototype;
+            if (xhrProto && typeof xhrProto.open === 'function') {
+                const origOpen = xhrProto.open;
+                xhrProto.open = function (...args) {
+                    try {
+                        const url = args[1];
+                        if (url && typeof url === 'string' && (url.includes('/api/timedtext') || url.includes('/youtubei/v1/get_transcript'))) {
+                            if (url.includes('/api/timedtext')) _rememberPotFromTimedtextUrl(url);
+                            this.addEventListener('loadend', function () {
+                                try {
+                                    if (this.status === 200 && typeof this.responseText === 'string') {
+                                        _rememberSubtitleBody(url, this.responseText);
+                                    }
+                                } catch {}
+                            }, { once: true });
+                        }
+                    } catch {}
+                    return origOpen.apply(this, args);
+                };
+            }
+            _potHooksInstalled = true;
+        } catch {}
+    }
+    _installPotHooksOnce();
+
+    // ==================================================
+    // MODO AGENTE DENTRO DEL IFRAME TRABAJADOR (/watch?v=ID&maximus_worker=1)
+    // ==================================================
+    if (esIframeTrabajador) {
+        const paramsUrl = new URLSearchParams(location.search);
+        const workerVideoId = paramsUrl.get('v') || '';
+
+        const silenciarBuffersDeVideo = () => {
+            try {
+                const vids = document.getElementsByTagName('video');
+                for (let i = 0; i < vids.length; i++) {
+                    const v = vids[i];
+                    v.muted = true;
+                    v.volume = 0;
+                }
+            } catch {}
+        };
+
+        const buscarParamTranscriptEnObjeto = raiz => {
+            if (!raiz) return '';
+            try {
+                const str = typeof raiz === 'string' ? raiz : JSON.stringify(raiz);
+                const m = str.match(/"getTranscriptEndpoint"\s*:\s*\{\s*"params"\s*:\s*"([^"]+)"/);
+                return m?.[1] || '';
+            } catch {
+                return '';
+            }
+        };
+
+        const intentarExtraccionDesdeAdentroDelIframe = async () => {
+            const inicio = Date.now();
+            let pr = null;
+            let initData = null;
+            let player = null;
+
+            while (Date.now() - inicio < 10000) {
+                silenciarBuffersDeVideo();
+                player = win.document?.getElementById('movie_player');
+                pr = player?.getPlayerResponse?.() || win.ytInitialPlayerResponse;
+                initData = win.ytInitialData;
+
+                if (pr && (pr.videoDetails?.videoId === workerVideoId || pr.captions || pr.playabilityStatus)) {
+                    break;
+                }
+                await new Promise(r => setTimeout(r, 150));
+            }
+
+            silenciarBuffersDeVideo();
+
+            const titulo = pr?.videoDetails?.title || '';
+            const mf = pr?.microformat?.playerMicroformatRenderer;
+            const fecha = (mf?.publishDate || mf?.uploadDate || '').slice(0, 10) || '0000-00-00';
+            const playabilityStatus = pr?.playabilityStatus?.status || 'OK';
+
+            let pistas =
+                pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks ||
+                pr?.captions?.playerCaptionsRenderer?.captionTracks ||
+                [];
+
+            let transcriptParams = buscarParamTranscriptEnObjeto(initData);
+
+            // 1. Si hay transcriptParams en ytInitialData, disparar get_transcript desde el contexto first-party del iframe
+            if (transcriptParams) {
+                try {
+                    const apiKey = win.ytcfg?.get?.('INNERTUBE_API_KEY') || '';
+                    const ctx = win.ytcfg?.get?.('INNERTUBE_CONTEXT') || {
+                        client: {
+                            clientName: 'WEB',
+                            clientVersion: win.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20260401.01.00',
+                            hl: 'es'
+                        }
+                    };
+                    const visitorData = win.ytcfg?.get?.('VISITOR_DATA') || ctx?.client?.visitorData || '';
+                    const headersTr = {
+                        'Content-Type': 'application/json',
+                        'X-Youtube-Client-Name': String(win.ytcfg?.get?.('INNERTUBE_CONTEXT_CLIENT_NAME') || 1),
+                        'X-Youtube-Client-Version': String(win.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20260401.01.00')
+                    };
+                    if (visitorData) headersTr['X-Goog-Visitor-Id'] = visitorData;
+
+                    const resTr = await win.fetch(`https://www.youtube.com/youtubei/v1/get_transcript?prettyPrint=false${apiKey ? `&key=${apiKey}` : ''}`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: headersTr,
+                        body: JSON.stringify({
+                            context: ctx,
+                            params: transcriptParams
+                        })
+                    });
+                    if (resTr.ok) {
+                        const jsonTr = await resTr.text();
+                        if (jsonTr && (jsonTr.includes('transcriptSegment') || jsonTr.includes('macroMarkersPanelItem'))) {
+                            window.parent.postMessage({
+                                type: 'MAXIMUS_WORKER_DONE',
+                                videoId: workerVideoId,
+                                noTieneSubtitulos: false,
+                                titulo,
+                                fecha,
+                                pistas,
+                                rawTranscriptJson: jsonTr
+                            }, '*');
+                            return;
+                        }
+                    }
+                } catch {}
+            }
+
+            // 2. Activar subtítulos y clic en botón CC / Panel de transcripción real del DOM del iframe
+            try {
+                if (player) {
+                    player.mute?.();
+                    player.loadModule?.('captions');
+                    player.loadModule?.('cc');
+                    const tracklist = player.getOption?.('captions', 'tracklist') || [];
+                    if (tracklist.length > 0 && pistas.length === 0) {
+                        pistas = tracklist;
+                    }
+                    const trackEsp = tracklist.find(t => /^es/i.test(t.languageCode)) || tracklist[0];
+                    if (trackEsp) {
+                        player.setOption?.('captions', 'track', trackEsp);
+                    }
+                }
+                const btnCc = document.querySelector('.ytp-subtitles-button[aria-pressed="false"]');
+                if (btnCc) btnCc.click();
+
+                const btnTranscriptDom = document.querySelector(
+                    'ytd-video-description-transcript-section-renderer button, button[aria-label*="transcripci" i], button[aria-label*="transcript" i]'
+                );
+                if (btnTranscriptDom) btnTranscriptDom.click();
+            } catch {}
+
+            // 3. Esperar hasta 3.8s por captura en vivo (de get_transcript o de timedtext con PO Token real)
+            const esperaCache = Date.now();
+            while (Date.now() - esperaCache < 3800) {
+                silenciarBuffersDeVideo();
+
+                if (_transcriptJsonPorVideoId.has(workerVideoId)) {
+                    window.parent.postMessage({
+                        type: 'MAXIMUS_WORKER_DONE',
+                        videoId: workerVideoId,
+                        noTieneSubtitulos: false,
+                        titulo,
+                        fecha,
+                        pistas,
+                        rawTranscriptJson: _transcriptJsonPorVideoId.get(workerVideoId),
+                        potParams: _potParamsByVideoId.get(workerVideoId) || _potLatestParams
+                    }, '*');
+                    return;
+                }
+
+                if (_subtitulosCachePorVideoId.has(workerVideoId)) {
+                    window.parent.postMessage({
+                        type: 'MAXIMUS_WORKER_DONE',
+                        videoId: workerVideoId,
+                        noTieneSubtitulos: false,
+                        titulo,
+                        fecha,
+                        pistas,
+                        rawTimedtextPayload: _subtitulosCachePorVideoId.get(workerVideoId),
+                        potParams: _potParamsByVideoId.get(workerVideoId) || _potLatestParams
+                    }, '*');
+                    return;
+                }
+
+                // Verificar si se renderizaron segmentos directamente en el DOM del panel de transcripción
+                const segsDom = document.querySelectorAll('ytd-transcript-segment-renderer, transcript-segment-view-model');
+                if (segsDom.length > 0) {
+                    const domCues = [];
+                    segsDom.forEach(nodo => {
+                        const tTxt = nodo.querySelector('.segment-timestamp, [class*="timestamp"]')?.textContent?.trim() || '0:00';
+                        const bTxt = nodo.querySelector('.segment-text, yt-formatted-string, [class*="segment-text"]')?.textContent?.trim() || '';
+                        if (bTxt) domCues.push({ tTxt, bTxt });
+                    });
+                    if (domCues.length > 0) {
+                        window.parent.postMessage({
+                            type: 'MAXIMUS_WORKER_DONE',
+                            videoId: workerVideoId,
+                            noTieneSubtitulos: false,
+                            titulo,
+                            fecha,
+                            pistas,
+                            domTranscriptCues: domCues
+                        }, '*');
+                        return;
+                    }
+                }
+
+                await new Promise(r => setTimeout(r, 140));
+            }
+
+            // Re-verificar pistas del player por si cargaron tarde
+            if (pistas.length === 0 && player?.getPlayerResponse) {
+                const prLate = player.getPlayerResponse();
+                pistas =
+                    prLate?.captions?.playerCaptionsTracklistRenderer?.captionTracks ||
+                    prLate?.captions?.playerCaptionsRenderer?.captionTracks ||
+                    [];
+            }
+
+            if (pistas.length === 0 && !transcriptParams) {
+                window.parent.postMessage({
+                    type: 'MAXIMUS_WORKER_DONE',
+                    videoId: workerVideoId,
+                    noTieneSubtitulos: true,
+                    titulo,
+                    fecha,
+                    playabilityStatus
+                }, '*');
+                return;
+            }
+
+            // 4. Descargar directamente la pista desde adentro del iframe
+            const esEspanol = code => /^es(?:-|$)/i.test(String(code || ''));
+            const elegida =
+                pistas.find(t => esEspanol(t.languageCode) && t.kind !== 'asr') ||
+                pistas.find(t => esEspanol(t.languageCode) && t.kind === 'asr') ||
+                pistas.find(t => t.kind !== 'asr') ||
+                pistas[0];
+
+            if (elegida?.baseUrl) {
+                let urlPista = elegida.baseUrl.replace(/\\u0026/g, '&');
+                if (!esEspanol(elegida.languageCode)) {
+                    urlPista += (urlPista.includes('?') ? '&' : '?') + 'tlang=es';
+                }
+                const pot = _potParamsByVideoId.get(workerVideoId) || _potLatestParams;
+                if (pot) {
+                    for (const [k, v] of Object.entries(pot)) {
+                        if (!urlPista.includes(`${k}=`)) {
+                            urlPista += `&${k}=${encodeURIComponent(v)}`;
+                        }
+                    }
+                }
+                for (const sufijo of ['', '&fmt=json3', '&fmt=srv1', '&fmt=vtt']) {
+                    try {
+                        const r = await win.fetch(urlPista + sufijo, { credentials: 'include' });
+                        if (r.ok) {
+                            const txt = await r.text();
+                            if (txt && txt.trim().length > 20 && !txt.includes('<!DOCTYPE')) {
+                                window.parent.postMessage({
+                                    type: 'MAXIMUS_WORKER_DONE',
+                                    videoId: workerVideoId,
+                                    noTieneSubtitulos: false,
+                                    titulo,
+                                    fecha,
+                                    pistas,
+                                    pistaElegida: elegida,
+                                    rawTimedtextPayload: txt,
+                                    potParams: pot
+                                }, '*');
+                                return;
+                            }
+                        }
+                    } catch {}
+                }
+            }
+
+            window.parent.postMessage({
+                type: 'MAXIMUS_WORKER_DONE',
+                videoId: workerVideoId,
+                noTieneSubtitulos: false,
+                titulo,
+                fecha,
+                pistas,
+                transcriptParams,
+                potParams: _potParamsByVideoId.get(workerVideoId) || _potLatestParams
+            }, '*');
+        };
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', intentarExtraccionDesdeAdentroDelIframe, { once: true });
+        } else {
+            intentarExtraccionDesdeAdentroDelIframe();
+        }
+        return;
+    }
+
+    // ==================================================
+    // VENTANA PRINCIPAL (CANAL O VIDEO INDIVIDUAL)
+    // ==================================================
+
+    const estadoFilas = new Map();
+    const abortadoresActivos = new Set();
+    const callbacksWorkersIframe = new Map();
+    const iframesActivosSet = new Set();
+
+    let panelCanal = null;
+    let ocupado = false;
+    let cancelado = false;
+    let pendiente = false;
+    let seqDescubrimiento = 0;
+    let iframesEnCurso = 0;
+
+    let enPausaPorCaptcha = false;
+    let resolverCaptchaFn = null;
+    let urlCaptchaActivo = '';
+    let timerAutoVerificacionCaptcha = null;
+
+    window.addEventListener('message', ev => {
+        try {
+            const d = ev.data;
+            if (!d || typeof d !== 'object') return;
+
+            if (d.type === 'MAXIMUS_POT_CAPTURED' && d.potParams) {
+                _potLatestParams = d.potParams;
+                if (d.videoId) {
+                    guardarEnMapaConLimite(_potParamsByVideoId, d.videoId, d.potParams, 80);
+                }
+            }
+
+            if (d.type === 'MAXIMUS_SUBTITLE_CAPTURED' && d.videoId && d.rawPayload) {
+                guardarEnMapaConLimite(_subtitulosCachePorVideoId, d.videoId, d.rawPayload, 50);
+            }
+
+            if (d.type === 'MAXIMUS_TRANSCRIPT_JSON_CAPTURED' && d.videoId && d.rawTranscriptJson) {
+                guardarEnMapaConLimite(_transcriptJsonPorVideoId, d.videoId, d.rawTranscriptJson, 50);
+            }
+
+            if (d.type === 'MAXIMUS_WORKER_DONE' && d.videoId) {
+                if (d.potParams) {
+                    _potLatestParams = d.potParams;
+                    guardarEnMapaConLimite(_potParamsByVideoId, d.videoId, d.potParams, 80);
+                }
+                if (d.rawTimedtextPayload) {
+                    guardarEnMapaConLimite(_subtitulosCachePorVideoId, d.videoId, d.rawTimedtextPayload, 50);
+                }
+                if (d.rawTranscriptJson) {
+                    guardarEnMapaConLimite(_transcriptJsonPorVideoId, d.videoId, d.rawTranscriptJson, 50);
+                }
+                const resolver = callbacksWorkersIframe.get(d.videoId);
+                if (resolver) {
+                    callbacksWorkersIframe.delete(d.videoId);
+                    resolver(d);
+                }
+            }
+        } catch {}
+    });
+
+    // ==================================================
+    // POOL DE IFRAMES /WATCH EN SIMULTÁNEO
+    // ==================================================
+
+    function destruirIframeSeguro(iframe) {
+        if (!iframe) return;
+        iframesActivosSet.delete(iframe);
+        try {
+            if (iframe.contentWindow) {
+                try {
+                    const vids = iframe.contentDocument?.getElementsByTagName?.('video');
+                    if (vids) {
+                        for (let i = 0; i < vids.length; i++) {
+                            vids[i].pause?.();
+                            vids[i].removeAttribute?.('src');
+                            vids[i].load?.();
+                        }
+                    }
+                } catch {}
+                try {
+                    iframe.contentWindow.stop?.();
+                } catch {}
+            }
+            iframe.src = 'about:blank';
+            if (iframe.contentDocument?.body) {
+                iframe.contentDocument.body.textContent = '';
+            }
+        } catch {}
+        setTimeout(() => {
+            try {
+                iframe.remove();
+            } catch {}
+        }, 40);
+    }
+
+    function limpiarTodosLosIframesTrabajadores() {
+        for (const iframe of iframesActivosSet) {
+            destruirIframeSeguro(iframe);
+        }
+        iframesActivosSet.clear();
+        for (const [, res] of callbacksWorkersIframe) {
+            try { res(null); } catch {}
+        }
+        callbacksWorkersIframe.clear();
+        iframesEnCurso = 0;
+    }
+
+    async function extraerMedianteIframeWatchReal(videoId, timeoutMs = CFG.TIMEOUT_IFRAME) {
+        verificarCancelacion();
+
+        while (iframesEnCurso >= CFG.MAX_IFRAMES_SIMULTANEOS) {
+            verificarCancelacion();
+            await new Promise(r => setTimeout(r, 120));
+        }
+
+        iframesEnCurso++;
+
+        return new Promise(resolve => {
+            let finalizado = false;
+            let iframe = null;
+            let timer = null;
+
+            const terminar = resultado => {
+                if (finalizado) return;
+                finalizado = true;
+                clearTimeout(timer);
+                callbacksWorkersIframe.delete(videoId);
+                iframesEnCurso = Math.max(0, iframesEnCurso - 1);
+                destruirIframeSeguro(iframe);
+                resolve(resultado);
+            };
+
+            callbacksWorkersIframe.set(videoId, datos => {
+                terminar(datos);
+            });
+
+            timer = setTimeout(() => {
+                terminar(null);
+            }, timeoutMs);
+
+            try {
+                iframe = document.createElement('iframe');
+                iframe.style.cssText =
+                    'position:fixed;bottom:4px;right:4px;width:240px;height:135px;opacity:0.01;z-index:-9999;pointer-events:none;border:0;';
+                iframe.setAttribute('aria-hidden', 'true');
+                iframe.allow = 'autoplay';
+                iframe.src = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=es&cc_load_policy=1&maximus_worker=1`;
+                iframesActivosSet.add(iframe);
+                (document.body || document.documentElement).appendChild(iframe);
+            } catch {
+                terminar(null);
+            }
+        });
+    }
+
+    // ==================================================
+    // AUTENTICACIÓN SAPISIDHASH Y HEADERS NATIVOS INNERTUBE DE YOUTUBE
+    // ==================================================
+
+    function leerCookie(nombre) {
+        const m = document.cookie.match(new RegExp('(?:^|;\\s*)' + nombre + '=([^;]*)'));
+        return m ? decodeURIComponent(m[1]) : '';
+    }
+
+    async function calcularSapisidHash(origin = 'https://www.youtube.com') {
+        try {
+            const sapisid = leerCookie('SAPISID') || leerCookie('__Secure-3PAPISID');
+            if (!sapisid || !crypto?.subtle) return null;
+            const ts = Math.floor(Date.now() / 1000);
+            const msg = new TextEncoder().encode(`${ts} ${sapisid} ${origin}`);
+            const hashBuf = await crypto.subtle.digest('SHA-1', msg);
+            const hashHex = Array.from(new Uint8Array(hashBuf))
+                .map(b => b.toString(16).padStart(2, '0'))
+                .join('');
+            return `SAPISIDHASH ${ts}_${hashHex} SAPISID1PHASH ${ts}_${hashHex} SAPISID3PHASH ${ts}_${hashHex}`;
+        } catch {
+            return null;
+        }
+    }
+
+    function obtenerConfigYtcfg() {
+        const get = k => {
+            try {
+                return win.ytcfg?.get?.(k) ?? win.ytcfg?.data_?.[k];
+            } catch {
+                return undefined;
+            }
+        };
+        const ctx = get('INNERTUBE_CONTEXT');
+        return {
+            apiKey: get('INNERTUBE_API_KEY') || '',
+            clientVersion: get('INNERTUBE_CLIENT_VERSION') || ctx?.client?.clientVersion || '2.20260401.01.00',
+            clientName: get('INNERTUBE_CONTEXT_CLIENT_NAME') || 1,
+            visitorData: get('VISITOR_DATA') || ctx?.client?.visitorData || '',
+            sessionIndex: String(get('SESSION_INDEX') ?? '0'),
+            delegatedSessionId: get('DELEGATED_SESSION_ID') || '',
+            sts: get('STS') || null,
+            hl: ctx?.client?.hl || 'es',
+            gl: ctx?.client?.gl || 'ES',
+            fullContext: ctx || null
+        };
+    }
+
+    async function construirHeadersInnerTube(incluirAuth = true) {
+        const cfg = obtenerConfigYtcfg();
+        const headers = {
+            'Content-Type': 'application/json',
+            'X-Youtube-Client-Name': String(cfg.clientName || 1),
+            'X-Youtube-Client-Version': String(cfg.clientVersion || '2.20260401.01.00'),
+            'X-Origin': 'https://www.youtube.com',
+            'Origin': 'https://www.youtube.com',
+            'X-Goog-AuthUser': cfg.sessionIndex || '0'
+        };
+        if (cfg.visitorData) headers['X-Goog-Visitor-Id'] = cfg.visitorData;
+        if (cfg.delegatedSessionId) headers['X-Goog-PageId'] = cfg.delegatedSessionId;
+
+        if (incluirAuth) {
+            const auth = await calcularSapisidHash('https://www.youtube.com');
+            if (auth) headers['Authorization'] = auth;
+        }
+
+        return { headers, cfg };
+    }
+
+    // ==================================================
+    // CODIFICADOR PROTOBUF PARA /youtubei/v1/get_transcript
+    // ==================================================
+
+    function encodeVarint(num) {
+        const bytes = [];
+        let n = num >>> 0;
+        while (n > 127) {
+            bytes.push((n & 0x7f) | 0x80);
+            n >>>= 7;
+        }
+        bytes.push(n);
+        return bytes;
+    }
+
+    function encodeProtobufString(fieldNumber, str) {
+        const utf8 = Array.from(new TextEncoder().encode(String(str)));
+        const tag = (fieldNumber << 3) | 2;
+        return [...encodeVarint(tag), ...encodeVarint(utf8.length), ...utf8];
+    }
+
+    function bytesToBase64(bytes) {
+        let bin = '';
+        for (let i = 0; i < bytes.length; i++) {
+            bin += String.fromCharCode(bytes[i]);
+        }
+        return btoa(bin);
+    }
+
+    function generarParamsProtobufGetTranscript(videoId, languageCode = 'es', kind = 'asr') {
+        const candidatos = [];
+        const idiomas = Array.from(new Set([languageCode || 'es', 'es', 'es-419', 'es-ES', 'en']));
+        const tipos = Array.from(new Set([kind ?? 'asr', 'asr', '']));
+
+        for (const lang of idiomas) {
+            for (const k of tipos) {
+                const inner = [
+                    ...encodeProtobufString(1, k),
+                    ...encodeProtobufString(2, lang),
+                    ...encodeProtobufString(3, '')
+                ];
+                const innerB64Url = encodeURIComponent(bytesToBase64(inner));
+                const outerA = [
+                    ...encodeProtobufString(1, videoId),
+                    ...encodeProtobufString(2, innerB64Url),
+                    0x18, 0x01
+                ];
+                candidatos.push(bytesToBase64(outerA));
+
+                const innerB64Raw = bytesToBase64(inner);
+                const outerB = [
+                    ...encodeProtobufString(1, videoId),
+                    ...encodeProtobufString(2, innerB64Raw),
+                    0x18, 0x01
+                ];
+                candidatos.push(bytesToBase64(outerB));
+            }
+        }
+
+        const outerDefault = [
+            ...encodeProtobufString(1, videoId),
+            0x18, 0x01
+        ];
+        candidatos.push(bytesToBase64(outerDefault));
+
+        return Array.from(new Set(candidatos));
+    }
+
+    // ==================================================
+    // CONTROL DE CANCELACIÓN Y DETENCIÓN
+    // ==================================================
+
+    function cancelarDescargaActiva() {
+        if (!ocupado) return;
+        cancelado = true;
+        if (enPausaPorCaptcha) {
+            reanudarDespuesDeCaptcha();
+        }
+        limpiarTodosLosIframesTrabajadores();
+        for (const abortar of abortadoresActivos) {
+            try {
+                abortar();
+            } catch {}
+        }
+        abortadoresActivos.clear();
+        if (panelCanal?.estado) {
+            panelCanal.estado.textContent = 'Deteniendo descarga...';
+        }
+    }
+
     function verificarCancelacion() {
-        if (estado.cancelado) {
+        if (cancelado) {
             const err = new Error('Descarga detenida por el usuario');
             err.esCancelacion = true;
             throw err;
         }
     }
-
-    // --- Módulo 2: Utilidades de texto, DOM, tiempos ETA, JSON y enlace con MAIN ---
-
-    // Funciones de texto, DOM, tiempos ETA, parseo JSON y comunicación con el mundo MAIN.
-
 
     const dormir = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -193,6 +872,10 @@
         }
         return nodo;
     }
+
+    // ==================================================
+    // UTILIDADES DE TEXTO, DESCARGA DE BLOBS Y NOMBRES DE ARCHIVO
+    // ==================================================
 
     const texto = value =>
         String(value ?? '')
@@ -237,202 +920,9 @@
         }, 10000);
     }
 
-    async function copiarAlPortapapeles(contenido) {
-        if (typeof GM_setClipboard === 'function') {
-            GM_setClipboard(contenido, 'text');
-            return;
-        }
-        try {
-            if (navigator.clipboard?.writeText) {
-                await navigator.clipboard.writeText(contenido);
-                return;
-            }
-        } catch {
-            // Fallback clásico si el documento no tiene foco o falta permiso del portapapeles.
-        }
-        const area = document.createElement('textarea');
-        area.value = contenido;
-        area.style.position = 'fixed';
-        area.style.opacity = '0';
-        document.body.appendChild(area);
-        area.select();
-        document.execCommand('copy');
-        area.remove();
-    }
-
-    function formatearTiempoRestante(segundosTotales) {
-        if (!Number.isFinite(segundosTotales) || segundosTotales <= 0) return 'calculando...';
-        const seg = Math.round(segundosTotales);
-        const d = Math.floor(seg / 86400);
-        const h = Math.floor((seg % 86400) / 3600);
-        const m = Math.floor((seg % 3600) / 60);
-        const s = seg % 60;
-
-        if (d > 0) return `${d} d ${h} h`;
-        if (h > 0) return `${h} h ${m} m`;
-        if (m > 0) return `${m} m ${s} s`;
-        return `${s} s`;
-    }
-
-    function calcularEta(procesados, total, tiempoInicioMs) {
-        if (procesados < 2 || total <= procesados) return '';
-        const segundosTranscurridos = (Date.now() - tiempoInicioMs) / 1000;
-        if (segundosTranscurridos < 2) return '';
-        const velocidad = procesados / segundosTranscurridos;
-        if (velocidad <= 0) return '';
-        const segundosRestantes = (total - procesados) / velocidad;
-        return formatearTiempoRestante(segundosRestantes);
-    }
-
-    function extraerJsonBalanceadoDesdeIndice(str, idxInicioLlave) {
-        if (idxInicioLlave === -1 || idxInicioLlave >= str.length) return null;
-        const inicio = str.indexOf('{', idxInicioLlave);
-        if (inicio === -1) return null;
-
-        let nivel = 0;
-        let enString = false;
-        let escape = false;
-
-        for (let i = inicio; i < str.length; i++) {
-            const ch = str[i];
-
-            if (escape) {
-                escape = false;
-                continue;
-            }
-            if (ch === '\\' && enString) {
-                escape = true;
-                continue;
-            }
-            if (ch === '"') {
-                enString = !enString;
-                continue;
-            }
-            if (!enString) {
-                if (ch === '{') {
-                    nivel++;
-                } else if (ch === '}') {
-                    nivel--;
-                    if (nivel === 0) {
-                        try {
-                            return JSON.parse(str.slice(inicio, i + 1));
-                        } catch {
-                            return null;
-                        }
-                    }
-                }
-            }
-        }
-        return null;
-    }
-
-    function extraerJsonBalanceado(html, marcador) {
-        const idx = html.indexOf(marcador);
-        if (idx === -1) return null;
-        return extraerJsonBalanceadoDesdeIndice(html, idx + marcador.length);
-    }
-
-    function extraerYtInitialDataDeHtml(html) {
-        return (
-            extraerJsonBalanceado(html, 'var ytInitialData =') ||
-            extraerJsonBalanceado(html, 'window["ytInitialData"] =') ||
-            extraerJsonBalanceado(html, 'ytInitialData =')
-        );
-    }
-
-    // Consulta al mundo MAIN mediante eventos síncronos del DOM cuando el script corre aislado (extensión MV3).
-    function solicitarEstadoPaginaMain(accion, extra = {}) {
-        if (typeof window === 'undefined' || !document.documentElement) return null;
-        const reqId = `c2t_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-        let respuesta = null;
-
-        const onRes = ev => {
-            try {
-                respuesta = ev.detail ? JSON.parse(ev.detail) : null;
-            } catch {
-                respuesta = null;
-            }
-        };
-
-        window.addEventListener(`chan2txt-res-${reqId}`, onRes, { once: true });
-        window.dispatchEvent(
-            new CustomEvent('chan2txt-req', {
-                detail: JSON.stringify({ reqId, accion, ...extra })
-            })
-        );
-        window.removeEventListener(`chan2txt-res-${reqId}`, onRes);
-        return respuesta;
-    }
-
-    // Lee ytInitialData, ytcfg y #movie_player; compatible con Tampermonkey y MV3.
-    function obtenerSnapshotPagina(videoId = '') {
-        const { win } = estado;
-
-        if (win?.ytcfg || win?.ytInitialData || win?.ytInitialPlayerResponse) {
-            const player = win.document?.getElementById('movie_player');
-            const pr = player?.getPlayerResponse?.() || win.ytInitialPlayerResponse || null;
-            const initData = win.ytInitialData || null;
-            return {
-                ytcfg: {
-                    apiKey: win.ytcfg?.get?.('INNERTUBE_API_KEY') ?? win.ytcfg?.data_?.INNERTUBE_API_KEY ?? '',
-                    clientVersion:
-                        win.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') ??
-                        win.ytcfg?.data_?.INNERTUBE_CLIENT_VERSION ??
-                        win.ytcfg?.get?.('INNERTUBE_CONTEXT')?.client?.clientVersion ??
-                        '2.20260401.01.00',
-                    clientName:
-                        win.ytcfg?.get?.('INNERTUBE_CONTEXT_CLIENT_NAME') ??
-                        win.ytcfg?.data_?.INNERTUBE_CONTEXT_CLIENT_NAME ??
-                        1,
-                    visitorData:
-                        win.ytcfg?.get?.('VISITOR_DATA') ??
-                        win.ytcfg?.data_?.VISITOR_DATA ??
-                        win.ytcfg?.get?.('INNERTUBE_CONTEXT')?.client?.visitorData ??
-                        '',
-                    sessionIndex: String(
-                        win.ytcfg?.get?.('SESSION_INDEX') ?? win.ytcfg?.data_?.SESSION_INDEX ?? '0'
-                    ),
-                    delegatedSessionId:
-                        win.ytcfg?.get?.('DELEGATED_SESSION_ID') ??
-                        win.ytcfg?.data_?.DELEGATED_SESSION_ID ??
-                        '',
-                    sts: win.ytcfg?.get?.('STS') ?? win.ytcfg?.data_?.STS ?? null,
-                    channelId: win.ytcfg?.get?.('CHANNEL_ID') ?? win.ytcfg?.data_?.CHANNEL_ID ?? '',
-                    fullContext: win.ytcfg?.get?.('INNERTUBE_CONTEXT') ?? win.ytcfg?.data_?.INNERTUBE_CONTEXT ?? null
-                },
-                pr,
-                initData
-            };
-        }
-
-        return solicitarEstadoPaginaMain('GET_SNAPSHOT', { videoId });
-    }
-
-    function activarSubtitulosMoviePlayer(silenciar = false) {
-        const playerDirecto = estado.win?.document?.getElementById('movie_player');
-        if (playerDirecto && typeof playerDirecto.getPlayerResponse === 'function') {
-            try {
-                if (silenciar) playerDirecto.mute?.();
-                playerDirecto.loadModule?.('captions');
-                playerDirecto.loadModule?.('cc');
-                const tracklist = playerDirecto.getOption?.('captions', 'tracklist') || [];
-                const trackEsp = tracklist.find(t => /^es/i.test(t.languageCode)) || tracklist[0];
-                if (trackEsp) {
-                    playerDirecto.setOption?.('captions', 'track', trackEsp);
-                }
-                return { tracklist };
-            } catch {
-                return { tracklist: [] };
-            }
-        }
-
-        return solicitarEstadoPaginaMain('ACTIVATE_CAPTIONS', { silenciar }) || { tracklist: [] };
-    }
-
-    // --- Módulo 3: Generador ZIP nativo (STORE + CRC32) y árbol ASCII ---
-
-    // Empaquetado ZIP sin compresión (STORE + CRC32) y mapa ASCII de archivos.
-
+    // ==================================================
+    // GENERADOR DE ÁRBOL ASCII (ESTILO MAXIMUS ORDEN)
+    // ==================================================
 
     function generarMapaArbol(raizNombre, listaArchivos) {
         const raiz = { hijos: new Map(), archivos: [] };
@@ -496,6 +986,10 @@
         recorrer(raiz, '');
         return lineas.join('\r\n');
     }
+
+    // ==================================================
+    // GENERADOR ZIP NATIVO (CRC32 + STORE)
+    // ==================================================
 
     const CRC_TABLA = (() => {
         const tabla = new Uint32Array(256);
@@ -632,7 +1126,7 @@
 
     function rutaLibre(zip, baseRuta, nombreArchivo) {
         const construir = n => (baseRuta ? `${baseRuta}/${n}` : n);
-        const candidato = construir(nombreArchivo);
+        let candidato = construir(nombreArchivo);
 
         if (!zip.tiene(candidato)) return candidato;
 
@@ -668,708 +1162,41 @@
         setTimeout(() => a.remove(), 10000);
     }
 
-    // --- Módulo 4: Interceptación en vivo de PO Token, timedtext y mensajes ---
+    // ==================================================
+    // CÁLCULO DE TIEMPO ESTIMADO (ETA)
+    // ==================================================
 
-    // Captura en vivo de parámetros PO Token, respuestas timedtext y mensajes entre ventanas.
+    function formatearTiempoRestante(segundosTotales) {
+        if (!Number.isFinite(segundosTotales) || segundosTotales <= 0) return 'calculando...';
+        const seg = Math.round(segundosTotales);
+        const d = Math.floor(seg / 86400);
+        const h = Math.floor((seg % 86400) / 3600);
+        const m = Math.floor((seg % 3600) / 60);
+        const s = seg % 60;
 
-
-    let receptorMensajesRegistrado = false;
-
-    function recordarPotDeTimedtextUrl(rawUrl) {
-        try {
-            if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.includes('/api/timedtext')) return;
-            const u = new URL(rawUrl, 'https://www.youtube.com');
-            const videoId = u.searchParams.get('v');
-            const pot = u.searchParams.get('pot');
-            if (!pot) return;
-
-            const collected = {};
-            for (const name of POT_CARRIED_PARAM_NAMES) {
-                const val = u.searchParams.get(name);
-                if (val !== null && val !== '') collected[name] = val;
-            }
-            estado.potLatestParams = collected;
-            if (videoId) {
-                guardarEnMapaConLimite(estado.potParamsByVideoId, videoId, collected, 80);
-            }
-            if (estado.esIframeTrabajador && window.parent && window.parent !== window) {
-                try {
-                    window.parent.postMessage(
-                        {
-                            type: 'MAXIMUS_POT_CAPTURED',
-                            videoId,
-                            potParams: collected
-                        },
-                        '*'
-                    );
-                } catch {
-                    // La ventana padre pudo cerrarse durante la navegación.
-                }
-            }
-        } catch {
-            // URL malformada o relativa sin base válida.
-        }
+        if (d > 0) return `${d} d ${h} h`;
+        if (h > 0) return `${h} h ${m} m`;
+        if (m > 0) return `${m} m ${s} s`;
+        return `${s} s`;
     }
 
-    function recordarCuerpoSubtitulo(rawUrl, bodyText) {
-        try {
-            if (!rawUrl || typeof rawUrl !== 'string') return;
-            if (typeof bodyText !== 'string' || bodyText.trim().length < 15 || bodyText.length > 2500000) return;
-
-            if (rawUrl.includes('/api/timedtext')) {
-                const u = new URL(rawUrl, 'https://www.youtube.com');
-                const videoId = u.searchParams.get('v');
-                if (videoId) {
-                    guardarEnMapaConLimite(estado.subtitulosCachePorVideoId, videoId, bodyText, 50);
-                    if (estado.esIframeTrabajador && window.parent && window.parent !== window) {
-                        try {
-                            window.parent.postMessage(
-                                {
-                                    type: 'MAXIMUS_SUBTITLE_CAPTURED',
-                                    videoId,
-                                    rawPayload: bodyText
-                                },
-                                '*'
-                            );
-                        } catch {
-                            // Ignorar si el padre ya descartó el iframe.
-                        }
-                    }
-                }
-            } else if (rawUrl.includes('/youtubei/v1/get_transcript')) {
-                const vidActual = new URLSearchParams(location.search).get('v') || '';
-                if (
-                    vidActual &&
-                    (bodyText.includes('transcriptSegment') || bodyText.includes('macroMarkersPanelItem'))
-                ) {
-                    guardarEnMapaConLimite(estado.transcriptJsonPorVideoId, vidActual, bodyText, 50);
-                    if (estado.esIframeTrabajador && window.parent && window.parent !== window) {
-                        try {
-                            window.parent.postMessage(
-                                {
-                                    type: 'MAXIMUS_TRANSCRIPT_JSON_CAPTURED',
-                                    videoId: vidActual,
-                                    rawTranscriptJson: bodyText
-                                },
-                                '*'
-                            );
-                        } catch {
-                            // Ignorar si el padre ya descartó el iframe.
-                        }
-                    }
-                }
-            }
-        } catch {
-            // Ignorar errores de lectura de URL.
-        }
+    function calcularEta(procesados, total, tiempoInicioMs) {
+        if (procesados < 2 || total <= procesados) return '';
+        const segundosTranscurridos = (Date.now() - tiempoInicioMs) / 1000;
+        if (segundosTranscurridos < 2) return '';
+        const velocidad = procesados / segundosTranscurridos;
+        if (velocidad <= 0) return '';
+        const segundosRestantes = (total - procesados) / velocidad;
+        return formatearTiempoRestante(segundosRestantes);
     }
 
-    // En Tampermonkey parcha fetch/XHR directamente; en extensión MV3 page-hook.js ya hace lo mismo en MAIN.
-    function instalarHooksPotUnaVez() {
-        if (estado.potHooksInstalled) return;
-        if (document.documentElement?.dataset?.chan2txtPageHook === '1') {
-            estado.potHooksInstalled = true;
-            return;
-        }
-
-        const { win } = estado;
-        if (!win) return;
-
-        try {
-            const origFetch = win.fetch;
-            if (typeof origFetch === 'function') {
-                win.fetch = function (...args) {
-                    try {
-                        const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
-                        if (
-                            url &&
-                            typeof url === 'string' &&
-                            (url.includes('/api/timedtext') || url.includes('/youtubei/v1/get_transcript'))
-                        ) {
-                            if (url.includes('/api/timedtext')) recordarPotDeTimedtextUrl(url);
-                            const p = origFetch.apply(this, args);
-                            p.then(res => {
-                                if (res && res.ok) {
-                                    res
-                                        .clone()
-                                        .text()
-                                        .then(b => recordarCuerpoSubtitulo(url, b))
-                                        .catch(() => {});
-                                }
-                            }).catch(() => {});
-                            return p;
-                        }
-                    } catch {
-                        // Continuar con el fetch original.
-                    }
-                    return origFetch.apply(this, args);
-                };
-            }
-
-            const xhrProto = win.XMLHttpRequest?.prototype;
-            if (xhrProto && typeof xhrProto.open === 'function') {
-                const origOpen = xhrProto.open;
-                xhrProto.open = function (...args) {
-                    try {
-                        const url = args[1];
-                        if (
-                            url &&
-                            typeof url === 'string' &&
-                            (url.includes('/api/timedtext') || url.includes('/youtubei/v1/get_transcript'))
-                        ) {
-                            if (url.includes('/api/timedtext')) recordarPotDeTimedtextUrl(url);
-                            this.addEventListener(
-                                'loadend',
-                                function () {
-                                    try {
-                                        if (this.status === 200 && typeof this.responseText === 'string') {
-                                            recordarCuerpoSubtitulo(url, this.responseText);
-                                        }
-                                    } catch {
-                                        // Ignorar respuestas binarias o no legibles.
-                                    }
-                                },
-                                { once: true }
-                            );
-                        }
-                    } catch {
-                        // No bloquear peticiones XHR de YouTube.
-                    }
-                    return origOpen.apply(this, args);
-                };
-            }
-            estado.potHooksInstalled = true;
-        } catch {
-            // Entornos restringidos sin acceso a prototipos de ventana.
-        }
-    }
-
-    function registrarReceptorMensajesVentana() {
-        if (receptorMensajesRegistrado || typeof window === 'undefined') return;
-        receptorMensajesRegistrado = true;
-
-        window.addEventListener('message', ev => {
-            try {
-                const d = ev.data;
-                if (!d || typeof d !== 'object') return;
-
-                if (d.type === 'MAXIMUS_POT_CAPTURED' && d.potParams) {
-                    estado.potLatestParams = d.potParams;
-                    if (d.videoId) {
-                        guardarEnMapaConLimite(estado.potParamsByVideoId, d.videoId, d.potParams, 80);
-                    }
-                }
-
-                if (d.type === 'MAXIMUS_SUBTITLE_CAPTURED' && d.videoId && d.rawPayload) {
-                    guardarEnMapaConLimite(estado.subtitulosCachePorVideoId, d.videoId, d.rawPayload, 50);
-                }
-
-                if (d.type === 'MAXIMUS_TRANSCRIPT_JSON_CAPTURED' && d.videoId && d.rawTranscriptJson) {
-                    guardarEnMapaConLimite(estado.transcriptJsonPorVideoId, d.videoId, d.rawTranscriptJson, 50);
-                }
-
-                if (d.type === 'MAXIMUS_WORKER_DONE' && d.videoId) {
-                    if (d.potParams) {
-                        estado.potLatestParams = d.potParams;
-                        guardarEnMapaConLimite(estado.potParamsByVideoId, d.videoId, d.potParams, 80);
-                    }
-                    if (d.rawTimedtextPayload) {
-                        guardarEnMapaConLimite(estado.subtitulosCachePorVideoId, d.videoId, d.rawTimedtextPayload, 50);
-                    }
-                    if (d.rawTranscriptJson) {
-                        guardarEnMapaConLimite(estado.transcriptJsonPorVideoId, d.videoId, d.rawTranscriptJson, 50);
-                    }
-                    const resolver = estado.callbacksWorkersIframe.get(d.videoId);
-                    if (resolver) {
-                        estado.callbacksWorkersIframe.delete(d.videoId);
-                        resolver(d);
-                    }
-                }
-            } catch {
-                // Ignorar mensajes externos de otros scripts en la página.
-            }
-        });
-    }
-
-    // --- Módulo 5: Pool de iframes trabajadores (/watch?v=ID&maximus_worker=1) ---
-
-    // Pool de iframes ocultos /watch?v=ID&maximus_worker=1 para extraer pistas y transcripciones reales del DOM.
-
-
-    function silenciarBuffersDeVideo() {
-        try {
-            const vids = document.getElementsByTagName('video');
-            for (let i = 0; i < vids.length; i++) {
-                const v = vids[i];
-                v.muted = true;
-                v.volume = 0;
-            }
-        } catch {
-            // Algunos reproductores bloquean propiedades multimedia hasta que cargan metadatos.
-        }
-    }
-
-    function buscarParamTranscriptEnObjeto(raiz) {
-        if (!raiz) return '';
-        try {
-            const str = typeof raiz === 'string' ? raiz : JSON.stringify(raiz);
-            const m = str.match(/"getTranscriptEndpoint"\s*:\s*\{\s*"params"\s*:\s*"([^"]+)"/);
-            return m?.[1] || '';
-        } catch {
-            return '';
-        }
-    }
-
-    async function ejecutarAgenteIframeTrabajador() {
-        const paramsUrl = new URLSearchParams(location.search);
-        const workerVideoId = paramsUrl.get('v') || '';
-
-        const correr = async () => {
-            const inicio = Date.now();
-            let snapshot = null;
-            let pr = null;
-            let initData = null;
-
-            while (Date.now() - inicio < 10000) {
-                silenciarBuffersDeVideo();
-                snapshot = obtenerSnapshotPagina(workerVideoId);
-                pr = snapshot?.pr || null;
-                initData = snapshot?.initData || null;
-
-                if (pr && (pr.videoDetails?.videoId === workerVideoId || pr.captions || pr.playabilityStatus)) {
-                    break;
-                }
-                await dormir(150);
-            }
-
-            silenciarBuffersDeVideo();
-
-            const titulo = pr?.videoDetails?.title || '';
-            const mf = pr?.microformat?.playerMicroformatRenderer;
-            const fecha = (mf?.publishDate || mf?.uploadDate || '').slice(0, 10) || '0000-00-00';
-            const playabilityStatus = pr?.playabilityStatus?.status || 'OK';
-
-            let pistas =
-                pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks ||
-                pr?.captions?.playerCaptionsRenderer?.captionTracks ||
-                [];
-
-            const transcriptParams = buscarParamTranscriptEnObjeto(initData);
-            const fetchFn = estado.win?.fetch || window.fetch;
-
-            // 1. Si hay transcriptParams en ytInitialData, consultar get_transcript desde el contexto first-party del iframe.
-            if (transcriptParams && typeof fetchFn === 'function') {
-                try {
-                    const ytcfg = snapshot?.ytcfg || {};
-                    const apiKey = ytcfg.apiKey || '';
-                    const ctx = ytcfg.fullContext || {
-                        client: {
-                            clientName: 'WEB',
-                            clientVersion: ytcfg.clientVersion || '2.20260401.01.00',
-                            hl: 'es'
-                        }
-                    };
-                    const visitorData = ytcfg.visitorData || ctx?.client?.visitorData || '';
-                    const headersTr = {
-                        'Content-Type': 'application/json',
-                        'X-Youtube-Client-Name': String(ytcfg.clientName || 1),
-                        'X-Youtube-Client-Version': String(ytcfg.clientVersion || '2.20260401.01.00')
-                    };
-                    if (visitorData) headersTr['X-Goog-Visitor-Id'] = visitorData;
-
-                    const resTr = await fetchFn.call(
-                        estado.win || window,
-                        `https://www.youtube.com/youtubei/v1/get_transcript?prettyPrint=false${apiKey ? `&key=${apiKey}` : ''}`,
-                        {
-                            method: 'POST',
-                            credentials: 'include',
-                            headers: headersTr,
-                            body: JSON.stringify({
-                                context: ctx,
-                                params: transcriptParams
-                            })
-                        }
-                    );
-                    if (resTr.ok) {
-                        const jsonTr = await resTr.text();
-                        if (
-                            jsonTr &&
-                            (jsonTr.includes('transcriptSegment') || jsonTr.includes('macroMarkersPanelItem'))
-                        ) {
-                            window.parent.postMessage(
-                                {
-                                    type: 'MAXIMUS_WORKER_DONE',
-                                    videoId: workerVideoId,
-                                    noTieneSubtitulos: false,
-                                    titulo,
-                                    fecha,
-                                    pistas,
-                                    rawTranscriptJson: jsonTr
-                                },
-                                '*'
-                            );
-                            return;
-                        }
-                    }
-                } catch {
-                    // Continuar con activación de subtítulos en el reproductor si get_transcript falla.
-                }
-            }
-
-            // 2. Activar subtítulos y abrir panel de transcripción en el DOM del iframe.
-            try {
-                const resPlayer = activarSubtitulosMoviePlayer(true);
-                if (Array.isArray(resPlayer?.tracklist) && resPlayer.tracklist.length > 0 && pistas.length === 0) {
-                    pistas = resPlayer.tracklist;
-                }
-                const btnCc = document.querySelector('.ytp-subtitles-button[aria-pressed="false"]');
-                if (btnCc) btnCc.click();
-
-                const btnTranscriptDom = document.querySelector(
-                    'ytd-video-description-transcript-section-renderer button, button[aria-label*="transcripci" i], button[aria-label*="transcript" i]'
-                );
-                if (btnTranscriptDom) btnTranscriptDom.click();
-            } catch {
-                // Seguir esperando captura por si el reproductor cargó los subtítulos automáticamente.
-            }
-
-            // 3. Esperar hasta 3.8s captura de red (get_transcript o timedtext con PO Token) o nodos en el DOM.
-            const esperaCache = Date.now();
-            while (Date.now() - esperaCache < 3800) {
-                silenciarBuffersDeVideo();
-
-                if (estado.transcriptJsonPorVideoId.has(workerVideoId)) {
-                    window.parent.postMessage(
-                        {
-                            type: 'MAXIMUS_WORKER_DONE',
-                            videoId: workerVideoId,
-                            noTieneSubtitulos: false,
-                            titulo,
-                            fecha,
-                            pistas,
-                            rawTranscriptJson: estado.transcriptJsonPorVideoId.get(workerVideoId),
-                            potParams: estado.potParamsByVideoId.get(workerVideoId) || estado.potLatestParams
-                        },
-                        '*'
-                    );
-                    return;
-                }
-
-                if (estado.subtitulosCachePorVideoId.has(workerVideoId)) {
-                    window.parent.postMessage(
-                        {
-                            type: 'MAXIMUS_WORKER_DONE',
-                            videoId: workerVideoId,
-                            noTieneSubtitulos: false,
-                            titulo,
-                            fecha,
-                            pistas,
-                            rawTimedtextPayload: estado.subtitulosCachePorVideoId.get(workerVideoId),
-                            potParams: estado.potParamsByVideoId.get(workerVideoId) || estado.potLatestParams
-                        },
-                        '*'
-                    );
-                    return;
-                }
-
-                const segsDom = document.querySelectorAll('ytd-transcript-segment-renderer, transcript-segment-view-model');
-                if (segsDom.length > 0) {
-                    const domCues = [];
-                    segsDom.forEach(nodo => {
-                        const tTxt = nodo.querySelector('.segment-timestamp, [class*="timestamp"]')?.textContent?.trim() || '0:00';
-                        const bTxt =
-                            nodo.querySelector('.segment-text, yt-formatted-string, [class*="segment-text"]')?.textContent?.trim() ||
-                            '';
-                        if (bTxt) domCues.push({ tTxt, bTxt });
-                    });
-                    if (domCues.length > 0) {
-                        window.parent.postMessage(
-                            {
-                                type: 'MAXIMUS_WORKER_DONE',
-                                videoId: workerVideoId,
-                                noTieneSubtitulos: false,
-                                titulo,
-                                fecha,
-                                pistas,
-                                domTranscriptCues: domCues
-                            },
-                            '*'
-                        );
-                        return;
-                    }
-                }
-
-                await dormir(140);
-            }
-
-            if (pistas.length === 0) {
-                const snapTardio = obtenerSnapshotPagina(workerVideoId);
-                const prLate = snapTardio?.pr;
-                pistas =
-                    prLate?.captions?.playerCaptionsTracklistRenderer?.captionTracks ||
-                    prLate?.captions?.playerCaptionsRenderer?.captionTracks ||
-                    [];
-            }
-
-            if (pistas.length === 0 && !transcriptParams) {
-                window.parent.postMessage(
-                    {
-                        type: 'MAXIMUS_WORKER_DONE',
-                        videoId: workerVideoId,
-                        noTieneSubtitulos: true,
-                        titulo,
-                        fecha,
-                        playabilityStatus
-                    },
-                    '*'
-                );
-                return;
-            }
-
-            // 4. Descargar la pista directamente desde la sesión del iframe.
-            const esEspanol = code => /^es(?:-|$)/i.test(String(code || ''));
-            const elegida =
-                pistas.find(t => esEspanol(t.languageCode) && t.kind !== 'asr') ||
-                pistas.find(t => esEspanol(t.languageCode) && t.kind === 'asr') ||
-                pistas.find(t => t.kind !== 'asr') ||
-                pistas[0];
-
-            if (elegida?.baseUrl && typeof fetchFn === 'function') {
-                let urlPista = elegida.baseUrl.replace(/\\u0026/g, '&');
-                if (!esEspanol(elegida.languageCode)) {
-                    urlPista += (urlPista.includes('?') ? '&' : '?') + 'tlang=es';
-                }
-                const pot = estado.potParamsByVideoId.get(workerVideoId) || estado.potLatestParams;
-                if (pot) {
-                    for (const [k, v] of Object.entries(pot)) {
-                        if (!urlPista.includes(`${k}=`)) {
-                            urlPista += `&${k}=${encodeURIComponent(v)}`;
-                        }
-                    }
-                }
-                for (const sufijo of ['', '&fmt=json3', '&fmt=srv1', '&fmt=vtt']) {
-                    try {
-                        const r = await fetchFn.call(estado.win || window, urlPista + sufijo, { credentials: 'include' });
-                        if (r.ok) {
-                            const txt = await r.text();
-                            if (txt && txt.trim().length > 20 && !txt.includes('<!DOCTYPE')) {
-                                window.parent.postMessage(
-                                    {
-                                        type: 'MAXIMUS_WORKER_DONE',
-                                        videoId: workerVideoId,
-                                        noTieneSubtitulos: false,
-                                        titulo,
-                                        fecha,
-                                        pistas,
-                                        pistaElegida: elegida,
-                                        rawTimedtextPayload: txt,
-                                        potParams: pot
-                                    },
-                                    '*'
-                                );
-                                return;
-                            }
-                        }
-                    } catch {
-                        // Probar el siguiente formato de salida.
-                    }
-                }
-            }
-
-            window.parent.postMessage(
-                {
-                    type: 'MAXIMUS_WORKER_DONE',
-                    videoId: workerVideoId,
-                    noTieneSubtitulos: false,
-                    titulo,
-                    fecha,
-                    pistas,
-                    transcriptParams,
-                    potParams: estado.potParamsByVideoId.get(workerVideoId) || estado.potLatestParams
-                },
-                '*'
-            );
-        };
-
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', correr, { once: true });
-        } else {
-            correr();
-        }
-    }
-
-    function destruirIframeSeguro(iframe) {
-        if (!iframe) return;
-        estado.iframesActivosSet.delete(iframe);
-        try {
-            if (iframe.contentWindow) {
-                try {
-                    const vids = iframe.contentDocument?.getElementsByTagName?.('video');
-                    if (vids) {
-                        for (let i = 0; i < vids.length; i++) {
-                            vids[i].pause?.();
-                            vids[i].removeAttribute?.('src');
-                            vids[i].load?.();
-                        }
-                    }
-                } catch {
-                    // Ignorar si el documento interno ya se descargó.
-                }
-                try {
-                    iframe.contentWindow.stop?.();
-                } catch {
-                    // Ignorar si el navegador ya detuvo la carga.
-                }
-            }
-            iframe.src = 'about:blank';
-            if (iframe.contentDocument?.body) {
-                iframe.contentDocument.body.textContent = '';
-            }
-        } catch {
-            // Ignorar errores al limpiar iframes desconectados.
-        }
-        setTimeout(() => {
-            try {
-                iframe.remove();
-            } catch {
-                // El nodo pudo haber salido antes del DOM.
-            }
-        }, 40);
-    }
-
-    function limpiarTodosLosIframesTrabajadores() {
-        for (const iframe of estado.iframesActivosSet) {
-            destruirIframeSeguro(iframe);
-        }
-        estado.iframesActivosSet.clear();
-        for (const [, res] of estado.callbacksWorkersIframe) {
-            try {
-                res(null);
-            } catch {
-                // Resolver en curso ya liberado.
-            }
-        }
-        estado.callbacksWorkersIframe.clear();
-        estado.iframesEnCurso = 0;
-    }
-
-    async function extraerMedianteIframeWatchReal(videoId, timeoutMs = CFG.TIMEOUT_IFRAME) {
-        verificarCancelacion();
-
-        while (estado.iframesEnCurso >= CFG.MAX_IFRAMES_SIMULTANEOS) {
-            verificarCancelacion();
-            await dormir(120);
-        }
-
-        estado.iframesEnCurso++;
-
-        return new Promise(resolve => {
-            let finalizado = false;
-            let iframe = null;
-            let timer = null;
-
-            const terminar = resultado => {
-                if (finalizado) return;
-                finalizado = true;
-                clearTimeout(timer);
-                estado.callbacksWorkersIframe.delete(videoId);
-                estado.iframesEnCurso = Math.max(0, estado.iframesEnCurso - 1);
-                destruirIframeSeguro(iframe);
-                resolve(resultado);
-            };
-
-            estado.callbacksWorkersIframe.set(videoId, datos => {
-                terminar(datos);
-            });
-
-            timer = setTimeout(() => {
-                terminar(null);
-            }, timeoutMs);
-
-            try {
-                iframe = document.createElement('iframe');
-                iframe.style.cssText =
-                    'position:fixed;bottom:4px;right:4px;width:240px;height:135px;opacity:0.01;z-index:-9999;pointer-events:none;border:0;';
-                iframe.setAttribute('aria-hidden', 'true');
-                iframe.allow = 'autoplay';
-                iframe.src = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=es&cc_load_policy=1&maximus_worker=1`;
-                estado.iframesActivosSet.add(iframe);
-                (document.body || document.documentElement).appendChild(iframe);
-            } catch {
-                terminar(null);
-            }
-        });
-    }
-
-    // --- Módulo 6: Transporte HTTP, autenticación SAPISIDHASH y control de reCAPTCHA ---
-
-    // Peticiones HTTP (fetch, puente de extensión y GM_xmlhttpRequest), autenticación SAPISIDHASH y pausa ante reCAPTCHA.
-
-
-    function leerCookie(nombre) {
-        const m = document.cookie.match(new RegExp('(?:^|;\\s*)' + nombre + '=([^;]*)'));
-        return m ? decodeURIComponent(m[1]) : '';
-    }
-
-    async function calcularSapisidHash(origin = 'https://www.youtube.com') {
-        try {
-            const sapisid = leerCookie('SAPISID') || leerCookie('__Secure-3PAPISID');
-            if (!sapisid || !crypto?.subtle) return null;
-            const ts = Math.floor(Date.now() / 1000);
-            const msg = new TextEncoder().encode(`${ts} ${sapisid} ${origin}`);
-            const hashBuf = await crypto.subtle.digest('SHA-1', msg);
-            const hashHex = Array.from(new Uint8Array(hashBuf))
-                .map(b => b.toString(16).padStart(2, '0'))
-                .join('');
-            return `SAPISIDHASH ${ts}_${hashHex} SAPISID1PHASH ${ts}_${hashHex} SAPISID3PHASH ${ts}_${hashHex}`;
-        } catch {
-            return null;
-        }
-    }
-
-    function obtenerConfigYtcfg() {
-        const snap = obtenerSnapshotPagina();
-        const ytcfg = snap?.ytcfg || {};
-        const ctx = ytcfg.fullContext || null;
-
-        return {
-            apiKey: ytcfg.apiKey || '',
-            clientVersion: ytcfg.clientVersion || ctx?.client?.clientVersion || '2.20260401.01.00',
-            clientName: ytcfg.clientName || 1,
-            visitorData: ytcfg.visitorData || ctx?.client?.visitorData || '',
-            sessionIndex: String(ytcfg.sessionIndex ?? '0'),
-            delegatedSessionId: ytcfg.delegatedSessionId || '',
-            sts: ytcfg.sts || null,
-            hl: ctx?.client?.hl || 'es',
-            gl: ctx?.client?.gl || 'ES',
-            fullContext: ctx
-        };
-    }
-
-    async function construirHeadersInnerTube(incluirAuth = true) {
-        const cfg = obtenerConfigYtcfg();
-        const headers = {
-            'Content-Type': 'application/json',
-            'X-Youtube-Client-Name': String(cfg.clientName || 1),
-            'X-Youtube-Client-Version': String(cfg.clientVersion || '2.20260401.01.00'),
-            'X-Origin': 'https://www.youtube.com',
-            Origin: 'https://www.youtube.com',
-            'X-Goog-AuthUser': cfg.sessionIndex || '0'
-        };
-        if (cfg.visitorData) headers['X-Goog-Visitor-Id'] = cfg.visitorData;
-        if (cfg.delegatedSessionId) headers['X-Goog-PageId'] = cfg.delegatedSessionId;
-
-        if (incluirAuth) {
-            const auth = await calcularSapisidHash('https://www.youtube.com');
-            if (auth) headers.Authorization = auth;
-        }
-
-        return { headers, cfg };
-    }
+    // ==================================================
+    // NOTIFICACIONES Y ALERTA SONORA ANTE CAPTCHA
+    // ==================================================
 
     function emitirPitidoAlerta() {
         try {
-            const AudioCtx = window.AudioContext || window.webkitAudioContext || estado.win?.AudioContext;
+            const AudioCtx = window.AudioContext || window.webkitAudioContext || unsafeWindow.AudioContext;
             if (!AudioCtx) return;
             const ctx = new AudioCtx();
             const osc = ctx.createOscillator();
@@ -1381,7 +1208,7 @@
             osc.type = 'sine';
             osc.frequency.setValueAtTime(659.25, ctx.currentTime);
             osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15);
-            osc.frequency.setValueAtTime(1046.5, ctx.currentTime + 0.3);
+            osc.frequency.setValueAtTime(1046.50, ctx.currentTime + 0.3);
 
             gain.gain.setValueAtTime(0.25, ctx.currentTime);
             gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
@@ -1389,15 +1216,9 @@
             osc.start(ctx.currentTime);
             osc.stop(ctx.currentTime + 0.6);
             setTimeout(() => {
-                try {
-                    ctx.close();
-                } catch {
-                    // El contexto pudo cerrarse antes del temporizador.
-                }
+                try { ctx.close(); } catch {}
             }, 800);
-        } catch {
-            // Ignorar si el navegador bloquea WebAudio sin gesto previo.
-        }
+        } catch {}
     }
 
     function enviarNotificacion(titulo, cuerpo, urlAbrir) {
@@ -1410,55 +1231,19 @@
                     highlight: true,
                     timeout: 25000,
                     onclick: () => {
-                        try {
-                            window.focus();
-                        } catch {
-                            // Sin acceso al foco.
-                        }
+                        try { window.focus(); } catch {}
                         if (urlAbrir) {
-                            try {
-                                window.open(urlAbrir, '_blank');
-                            } catch {
-                                // Popups bloqueados.
-                            }
+                            try { window.open(urlAbrir, '_blank'); } catch {}
                         }
                     }
                 });
-                return;
             }
-
-            if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-                chrome.runtime.sendMessage({
-                    action: 'MAXIMUS_NOTIFY',
-                    title: titulo,
-                    message: cuerpo,
-                    url: urlAbrir
-                });
-                return;
-            }
-
-            if (document.documentElement?.dataset?.maximusBridge === '1') {
-                window.dispatchEvent(
-                    new CustomEvent('maximus-bridge-notify', {
-                        detail: { title: titulo, message: cuerpo, url: urlAbrir }
-                    })
-                );
-                return;
-            }
-
-            if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-                const n = new Notification(titulo, { body: cuerpo });
-                if (urlAbrir) {
-                    n.onclick = () => {
-                        window.focus();
-                        window.open(urlAbrir, '_blank');
-                    };
-                }
-            }
-        } catch {
-            // No detener el flujo si fallan las notificaciones del sistema.
-        }
+        } catch {}
     }
+
+    // ==================================================
+    // DETECCIÓN Y GESTIÓN DE RECAPTCHA / BOT DETECTION
+    // ==================================================
 
     function esRespuestaCaptcha(status, textoResp, finalUrl) {
         if (status === 429) return true;
@@ -1480,240 +1265,82 @@
     }
 
     function activarPausaPorCaptcha(url) {
-        if (estado.enPausaPorCaptcha) return;
-        estado.enPausaPorCaptcha = true;
-        estado.urlCaptchaActivo = url || 'https://www.youtube.com/';
+        if (enPausaPorCaptcha) return;
+        enPausaPorCaptcha = true;
+        urlCaptchaActivo = url || 'https://www.youtube.com/';
 
         emitirPitidoAlerta();
         enviarNotificacion(
             '⚠️ YouTube a TXT: ¡Saltó el reCAPTCHA!',
-            '¡Saltó el reCAPTCHA! Ábrelo, resuélvelo manualmente y pulsa Continuar en el panel.',
-            estado.urlCaptchaActivo
+            '¡A yapo saltó el reCAPTCHA! Tomás, mira esto es tuyo: resuélvelo que te espero para continuar.',
+            urlCaptchaActivo
         );
 
-        if (estado.panelCanal) {
-            estado.panelCanal.panel.classList.add('alerta-captcha');
-            if (estado.panelCanal.btnCaptcha) {
-                estado.panelCanal.btnCaptcha.hidden = false;
-                estado.panelCanal.btnCaptcha.textContent = '⚡ Resolver Captcha y Continuar';
-                estado.panelCanal.btnCaptcha.title = 'Haz clic para abrir el captcha en una pestaña y reanudar';
+        if (panelCanal) {
+            panelCanal.panel.classList.add('alerta-captcha');
+            if (panelCanal.btnCaptcha) {
+                panelCanal.btnCaptcha.hidden = false;
+                panelCanal.btnCaptcha.textContent = '⚡ Resolver Captcha y Continuar';
+                panelCanal.btnCaptcha.title = 'Haz clic para abrir el captcha y reanudar';
             }
-            estado.panelCanal.estado.textContent =
-                '⚠️ Saltó el reCAPTCHA: resuélvelo manualmente y luego pulsa "Ya lo resolví, ¡Continuar!".';
+            panelCanal.estado.textContent =
+                '⚠️ ¡A yapo saltó el reCAPTCHA! Tomás, mira esto es tuyo: resuélvelo que te espero para continuar...';
         }
+
+        clearInterval(timerAutoVerificacionCaptcha);
+        timerAutoVerificacionCaptcha = setInterval(async () => {
+            if (!enPausaPorCaptcha || cancelado) {
+                clearInterval(timerAutoVerificacionCaptcha);
+                return;
+            }
+            try {
+                const test = await peticionHttpBaja('https://www.youtube.com/?hl=es', { timeout: 8000 });
+                if (test.status === 200 && !esRespuestaCaptcha(test.status, test.text, test.finalUrl)) {
+                    clearInterval(timerAutoVerificacionCaptcha);
+                    reanudarDespuesDeCaptcha();
+                }
+            } catch {}
+        }, 4500);
     }
 
     function esperarResolucionCaptcha() {
-        if (!estado.enPausaPorCaptcha) return Promise.resolve();
+        if (!enPausaPorCaptcha) return Promise.resolve();
         return new Promise(resolve => {
-            estado.resolverCaptchaFn = resolve;
+            resolverCaptchaFn = resolve;
         });
     }
 
     function reanudarDespuesDeCaptcha() {
-        if (!estado.enPausaPorCaptcha) return;
-        estado.enPausaPorCaptcha = false;
-        estado.urlCaptchaActivo = '';
+        clearInterval(timerAutoVerificacionCaptcha);
+        if (!enPausaPorCaptcha) return;
+        enPausaPorCaptcha = false;
+        urlCaptchaActivo = '';
 
-        if (estado.panelCanal) {
-            estado.panelCanal.panel.classList.remove('alerta-captcha');
-            if (estado.panelCanal.btnCaptcha) {
-                estado.panelCanal.btnCaptcha.hidden = true;
-                delete estado.panelCanal.btnCaptcha.dataset.abierto;
+        if (panelCanal) {
+            panelCanal.panel.classList.remove('alerta-captcha');
+            if (panelCanal.btnCaptcha) {
+                panelCanal.btnCaptcha.hidden = true;
+                delete panelCanal.btnCaptcha.dataset.abierto;
             }
-            estado.panelCanal.estado.textContent = 'Captcha resuelto. Reanudando descargas...';
+            panelCanal.estado.textContent = 'Captcha resuelto. Reanudando descargas...';
         }
 
-        if (typeof estado.resolverCaptchaFn === 'function') {
-            const fn = estado.resolverCaptchaFn;
-            estado.resolverCaptchaFn = null;
+        if (typeof resolverCaptchaFn === 'function') {
+            const fn = resolverCaptchaFn;
+            resolverCaptchaFn = null;
             fn();
         }
     }
 
-    function cancelarDescargaActiva() {
-        if (!estado.ocupado) return;
-        estado.cancelado = true;
-        if (estado.enPausaPorCaptcha) {
-            reanudarDespuesDeCaptcha();
-        }
-        limpiarTodosLosIframesTrabajadores();
-        for (const abortar of estado.abortadoresActivos) {
-            try {
-                abortar();
-            } catch {
-                // La petición ya pudo haber cerrado.
-            }
-        }
-        estado.abortadoresActivos.clear();
-        if (estado.panelCanal?.estado) {
-            estado.panelCanal.estado.textContent = 'Deteniendo descarga...';
-        }
-    }
+    // ==================================================
+    // PETICIONES HTTP CON TRANSPORTE GM ROBUSTO Y CANCELACIÓN
+    // ==================================================
 
     function obtenerGmTransporte() {
         if (typeof GM_xmlhttpRequest === 'function') return GM_xmlhttpRequest;
         if (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function') return GM.xmlHttpRequest;
         if (typeof window !== 'undefined' && typeof window.GM_xmlhttpRequest === 'function') return window.GM_xmlhttpRequest;
-        if (typeof unsafeWindow !== 'undefined' && typeof unsafeWindow.GM_xmlhttpRequest === 'function') {
-            return unsafeWindow.GM_xmlhttpRequest;
-        }
-        return null;
-    }
-
-    function peticionViaBackground(url, opciones, timeout) {
-        const method = (opciones.method || 'GET').toUpperCase();
-        const headers = {
-            Accept: '*/*',
-            'Accept-Language': 'es-419,es;q=0.9',
-            ...(opciones.headers || {})
-        };
-        const body = opciones.body || opciones.data || undefined;
-        const anonymous = Boolean(opciones.anonymous);
-
-        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-            return new Promise((resolve, reject) => {
-                if (estado.cancelado) {
-                    const err = new Error('Descarga detenida por el usuario');
-                    err.esCancelacion = true;
-                    return reject(err);
-                }
-
-                let finalizado = false;
-                const requestId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-
-                const abortar = () => {
-                    if (finalizado) return;
-                    finalizado = true;
-                    clearTimeout(timer);
-                    estado.abortadoresActivos.delete(abortar);
-                    try {
-                        chrome.runtime.sendMessage({ action: 'MAXIMUS_ABORT', requestId });
-                    } catch {
-                        // Ignorar si el worker no está activo.
-                    }
-                    const err = new Error('Descarga detenida por el usuario');
-                    err.esCancelacion = true;
-                    reject(err);
-                };
-
-                estado.abortadoresActivos.add(abortar);
-
-                const timer = setTimeout(() => {
-                    if (finalizado) return;
-                    finalizado = true;
-                    estado.abortadoresActivos.delete(abortar);
-                    try {
-                        chrome.runtime.sendMessage({ action: 'MAXIMUS_ABORT', requestId });
-                    } catch {
-                        // Ignorar.
-                    }
-                    reject(new Error('Tiempo agotado'));
-                }, timeout);
-
-                chrome.runtime.sendMessage(
-                    {
-                        action: 'MAXIMUS_HTTP_REQUEST',
-                        requestId,
-                        url,
-                        method,
-                        headers,
-                        body,
-                        anonymous,
-                        timeout
-                    },
-                    respuesta => {
-                        if (finalizado) return;
-                        finalizado = true;
-                        clearTimeout(timer);
-                        estado.abortadoresActivos.delete(abortar);
-
-                        if (chrome.runtime.lastError) {
-                            return reject(new Error(chrome.runtime.lastError.message || 'Error en background'));
-                        }
-                        if (!respuesta || respuesta.error) {
-                            return reject(new Error(respuesta?.error || 'Error de red en background'));
-                        }
-                        resolve({
-                            status: respuesta.status,
-                            text: respuesta.text || '',
-                            finalUrl: respuesta.finalUrl || url
-                        });
-                    }
-                );
-            });
-        }
-
-        if (document.documentElement?.dataset?.maximusBridge === '1') {
-            return new Promise((resolve, reject) => {
-                if (estado.cancelado) {
-                    const err = new Error('Descarga detenida por el usuario');
-                    err.esCancelacion = true;
-                    return reject(err);
-                }
-
-                let finalizado = false;
-                const requestId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-                const eventoRespuesta = `maximus-bridge-res-${requestId}`;
-
-                const limpiar = () => {
-                    clearTimeout(timer);
-                    estado.abortadoresActivos.delete(abortar);
-                    window.removeEventListener(eventoRespuesta, onRespuesta);
-                };
-
-                const abortar = () => {
-                    if (finalizado) return;
-                    finalizado = true;
-                    limpiar();
-                    window.dispatchEvent(new CustomEvent('maximus-bridge-abort', { detail: { requestId } }));
-                    const err = new Error('Descarga detenida por el usuario');
-                    err.esCancelacion = true;
-                    reject(err);
-                };
-
-                const onRespuesta = e => {
-                    if (finalizado) return;
-                    finalizado = true;
-                    limpiar();
-                    const respuesta = e.detail;
-                    if (!respuesta || respuesta.error) {
-                        return reject(new Error(respuesta?.error || 'Error de red en puente DOM'));
-                    }
-                    resolve({
-                        status: respuesta.status,
-                        text: respuesta.text || '',
-                        finalUrl: respuesta.finalUrl || url
-                    });
-                };
-
-                estado.abortadoresActivos.add(abortar);
-                window.addEventListener(eventoRespuesta, onRespuesta, { once: true });
-
-                const timer = setTimeout(() => {
-                    if (finalizado) return;
-                    finalizado = true;
-                    limpiar();
-                    window.dispatchEvent(new CustomEvent('maximus-bridge-abort', { detail: { requestId } }));
-                    reject(new Error('Tiempo agotado'));
-                }, timeout);
-
-                window.dispatchEvent(
-                    new CustomEvent('maximus-bridge-http', {
-                        detail: {
-                            requestId,
-                            url,
-                            method,
-                            headers,
-                            body,
-                            anonymous,
-                            timeout
-                        }
-                    })
-                );
-            });
-        }
-
+        if (typeof unsafeWindow !== 'undefined' && typeof unsafeWindow.GM_xmlhttpRequest === 'function') return unsafeWindow.GM_xmlhttpRequest;
         return null;
     }
 
@@ -1728,12 +1355,11 @@
         };
         const data = opciones.body || opciones.data || undefined;
         const anonymous = Boolean(opciones.anonymous);
-        const timeout = opciones.timeout || CFG.TIMEOUT;
         const gm = obtenerGmTransporte();
 
         if (gm && !opciones.preferirFetch) {
             return new Promise((resolve, reject) => {
-                if (estado.cancelado) {
+                if (cancelado) {
                     const err = new Error('Descarga detenida por el usuario');
                     err.esCancelacion = true;
                     return reject(err);
@@ -1746,36 +1372,28 @@
                     if (finalizado) return;
                     finalizado = true;
                     clearTimeout(timer);
-                    estado.abortadoresActivos.delete(abortar);
-                    try {
-                        req?.abort?.();
-                    } catch {
-                        // Ignorar.
-                    }
+                    abortadoresActivos.delete(abortar);
+                    try { req?.abort?.(); } catch {}
                     const err = new Error('Descarga detenida por el usuario');
                     err.esCancelacion = true;
                     reject(err);
                 };
 
-                estado.abortadoresActivos.add(abortar);
+                abortadoresActivos.add(abortar);
 
                 const timer = setTimeout(() => {
                     if (finalizado) return;
                     finalizado = true;
-                    estado.abortadoresActivos.delete(abortar);
-                    try {
-                        req?.abort?.();
-                    } catch {
-                        // Ignorar.
-                    }
+                    abortadoresActivos.delete(abortar);
+                    try { req?.abort?.(); } catch {}
                     reject(new Error('Tiempo agotado'));
-                }, timeout);
+                }, opciones.timeout || CFG.TIMEOUT);
 
                 const fin = (fn, val) => {
                     if (finalizado) return;
                     finalizado = true;
                     clearTimeout(timer);
-                    estado.abortadoresActivos.delete(abortar);
+                    abortadoresActivos.delete(abortar);
                     fn(val);
                 };
 
@@ -1790,7 +1408,7 @@
                         data,
                         withCredentials: !anonymous,
                         anonymous,
-                        timeout,
+                        timeout: opciones.timeout || CFG.TIMEOUT,
                         onload: r => {
                             fin(resolve, {
                                 status: r.status,
@@ -1812,60 +1430,53 @@
             });
         }
 
-        // En extensión MV3 usamos background.js cuando se piden llamadas sin cookies o fuera de preferirFetch.
-        if (!opciones.preferirFetch && !gm) {
-            const bgPromise = peticionViaBackground(url, opciones, timeout);
-            if (bgPromise) return bgPromise;
-        }
-
         return new Promise((resolve, reject) => {
-            const fetchFn = (estado.win && estado.win.fetch) || (typeof fetch === 'function' ? fetch : null);
+            const fetchFn = (win && win.fetch) || (typeof fetch === 'function' ? fetch : null);
             if (!fetchFn) {
                 return reject(new Error('No hay transporte HTTP disponible'));
             }
 
             const ctrl = new AbortController();
             const abortar = () => ctrl.abort();
-            estado.abortadoresActivos.add(abortar);
-            const timer = setTimeout(() => ctrl.abort(), timeout);
+            abortadoresActivos.add(abortar);
+            const timer = setTimeout(() => ctrl.abort(), opciones.timeout || CFG.TIMEOUT);
 
-            fetchFn
-                .call(estado.win || window, url, {
-                    method,
-                    headers,
-                    body: data,
-                    credentials: anonymous ? 'omit' : 'include',
-                    cache: 'no-store',
-                    signal: ctrl.signal
-                })
-                .then(async res => {
-                    const text = await res.text();
-                    return {
-                        status: res.status,
-                        text,
-                        finalUrl: res.url || url
-                    };
-                })
-                .then(resolve)
-                .catch(e => {
-                    if (estado.cancelado || ctrl.signal.aborted) {
-                        const err = new Error('Descarga detenida por el usuario');
-                        err.esCancelacion = true;
-                        return reject(err);
-                    }
-                    reject(e);
-                })
-                .finally(() => {
-                    clearTimeout(timer);
-                    estado.abortadoresActivos.delete(abortar);
-                });
+            fetchFn.call(win, url, {
+                method,
+                headers,
+                body: data,
+                credentials: anonymous ? 'omit' : 'include',
+                cache: 'no-store',
+                signal: ctrl.signal
+            })
+            .then(async res => {
+                const text = await res.text();
+                return {
+                    status: res.status,
+                    text,
+                    finalUrl: res.url || url
+                };
+            })
+            .then(resolve)
+            .catch(e => {
+                if (cancelado || ctrl.signal.aborted) {
+                    const err = new Error('Descarga detenida por el usuario');
+                    err.esCancelacion = true;
+                    return reject(err);
+                }
+                reject(e);
+            })
+            .finally(() => {
+                clearTimeout(timer);
+                abortadoresActivos.delete(abortar);
+            });
         });
     }
 
     async function peticionHttp(url, opciones = {}) {
         verificarCancelacion();
 
-        if (estado.enPausaPorCaptcha) {
+        if (enPausaPorCaptcha) {
             await esperarResolucionCaptcha();
             verificarCancelacion();
         }
@@ -1896,73 +1507,245 @@
 
     const fetchTexto = peticionHttp;
 
-    // --- Módulo 7: Codificador Protobuf, parsers de subtítulos y bloques de 200 caracteres ---
+    // ==================================================
+    // PARSEO LIGERO DE BLOQUES JSON Y EXTRACCIÓN MULTI-CLIENTE INNERTUBE
+    // ==================================================
 
-    // Codificación Protobuf para get_transcript, parseo XML/JSON3/VTT y armado de bloques de 200 caracteres.
+    function extraerJsonBalanceadoDesdeIndice(str, idxInicioLlave) {
+        if (idxInicioLlave === -1 || idxInicioLlave >= str.length) return null;
+        const inicio = str.indexOf('{', idxInicioLlave);
+        if (inicio === -1) return null;
 
+        let nivel = 0;
+        let enString = false;
+        let escape = false;
 
-    function encodeVarint(num) {
-        const bytes = [];
-        let n = num >>> 0;
-        while (n > 127) {
-            bytes.push((n & 0x7f) | 0x80);
-            n >>>= 7;
+        for (let i = inicio; i < str.length; i++) {
+            const ch = str[i];
+
+            if (escape) {
+                escape = false;
+                continue;
+            }
+            if (ch === '\\' && enString) {
+                escape = true;
+                continue;
+            }
+            if (ch === '"') {
+                enString = !enString;
+                continue;
+            }
+            if (!enString) {
+                if (ch === '{') nivel++;
+                else if (ch === '}') {
+                    nivel--;
+                    if (nivel === 0) {
+                        try {
+                            return JSON.parse(str.slice(inicio, i + 1));
+                        } catch {
+                            return null;
+                        }
+                    }
+                }
+            }
         }
-        bytes.push(n);
-        return bytes;
+        return null;
     }
 
-    function encodeProtobufString(fieldNumber, str) {
-        const utf8 = Array.from(new TextEncoder().encode(String(str)));
-        const tag = (fieldNumber << 3) | 2;
-        return [...encodeVarint(tag), ...encodeVarint(utf8.length), ...utf8];
+    function extraerJsonBalanceado(html, marcador) {
+        const idx = html.indexOf(marcador);
+        if (idx === -1) return null;
+        return extraerJsonBalanceadoDesdeIndice(html, idx + marcador.length);
     }
 
-    function bytesToBase64(bytes) {
-        let bin = '';
-        for (let i = 0; i < bytes.length; i++) {
-            bin += String.fromCharCode(bytes[i]);
+    function extraerYtInitialDataDeHtml(html) {
+        return (
+            extraerJsonBalanceado(html, 'var ytInitialData =') ||
+            extraerJsonBalanceado(html, 'window["ytInitialData"] =') ||
+            extraerJsonBalanceado(html, 'ytInitialData =')
+        );
+    }
+
+    function extraerDatosLigerosDeHtmlWatch(html) {
+        if (!html || typeof html !== 'string') {
+            return { titulo: '', fecha: '0000-00-00', pistas: [], transcriptParams: [], playabilityStatus: 'OK', visitorData: '' };
         }
-        return btoa(bin);
-    }
 
-    function generarParamsProtobufGetTranscript(videoId, languageCode = 'es', kind = 'asr') {
-        const candidatos = [];
-        const idiomas = Array.from(new Set([languageCode || 'es', 'es', 'es-419', 'es-ES', 'en']));
-        const tipos = Array.from(new Set([kind ?? 'asr', 'asr', '']));
+        const transcriptParams = [];
+        const reTranscript = /"getTranscriptEndpoint"\s*:\s*\{\s*"params"\s*:\s*"([^"]+)"/g;
+        let m;
+        while ((m = reTranscript.exec(html)) !== null) {
+            if (m[1]) transcriptParams.push(m[1]);
+        }
 
-        for (const lang of idiomas) {
-            for (const k of tipos) {
-                const inner = [
-                    ...encodeProtobufString(1, k),
-                    ...encodeProtobufString(2, lang),
-                    ...encodeProtobufString(3, '')
-                ];
-                const innerB64Url = encodeURIComponent(bytesToBase64(inner));
-                const outerA = [
-                    ...encodeProtobufString(1, videoId),
-                    ...encodeProtobufString(2, innerB64Url),
-                    0x18,
-                    0x01
-                ];
-                candidatos.push(bytesToBase64(outerA));
+        let visitorData = '';
+        const mVis = html.match(/"VISITOR_DATA"\s*:\s*"([^"]+)"/) || html.match(/"visitorData"\s*:\s*"([^"]+)"/);
+        if (mVis?.[1]) visitorData = mVis[1];
 
-                const innerB64Raw = bytesToBase64(inner);
-                const outerB = [
-                    ...encodeProtobufString(1, videoId),
-                    ...encodeProtobufString(2, innerB64Raw),
-                    0x18,
-                    0x01
-                ];
-                candidatos.push(bytesToBase64(outerB));
+        let fecha = '0000-00-00';
+        const mFecha =
+            html.match(/"publishDate"\s*:\s*"(\d{4}-\d{2}-\d{2})/) ||
+            html.match(/"uploadDate"\s*:\s*"(\d{4}-\d{2}-\d{2})/) ||
+            html.match(/itemprop="datePublished"\s+content="(\d{4}-\d{2}-\d{2})/);
+        if (mFecha?.[1]) fecha = mFecha[1];
+
+        let titulo = '';
+        let pistas = [];
+        let playabilityStatus = 'OK';
+
+        const idxCaptions = html.indexOf('"playerCaptionsTracklistRenderer":');
+        if (idxCaptions !== -1) {
+            const objCap = extraerJsonBalanceadoDesdeIndice(html, idxCaptions + '"playerCaptionsTracklistRenderer":'.length);
+            if (Array.isArray(objCap?.captionTracks)) {
+                pistas = objCap.captionTracks;
             }
         }
 
-        const outerDefault = [...encodeProtobufString(1, videoId), 0x18, 0x01];
-        candidatos.push(bytesToBase64(outerDefault));
+        const idxDetails = html.indexOf('"videoDetails":');
+        if (idxDetails !== -1) {
+            const objDet = extraerJsonBalanceadoDesdeIndice(html, idxDetails + '"videoDetails":'.length);
+            if (objDet?.title) {
+                titulo = texto(objDet.title);
+            }
+        }
 
-        return Array.from(new Set(candidatos));
+        const idxPlay = html.indexOf('"playabilityStatus":');
+        if (idxPlay !== -1) {
+            const objPlay = extraerJsonBalanceadoDesdeIndice(html, idxPlay + '"playabilityStatus":'.length);
+            if (objPlay?.status) {
+                playabilityStatus = objPlay.status;
+            }
+        }
+
+        return {
+            titulo,
+            fecha,
+            pistas,
+            transcriptParams: Array.from(new Set(transcriptParams)),
+            playabilityStatus,
+            visitorData
+        };
     }
+
+    // Consulta /youtubei/v1/next para obtener el getTranscriptEndpoint firmado oficial de un video sin cargar el DOM
+    async function obtenerDatosViaInnertubeNext(videoId) {
+        verificarCancelacion();
+        const { headers, cfg } = await construirHeadersInnerTube(true);
+        const urlNext = `https://www.youtube.com/youtubei/v1/next?prettyPrint=false${cfg.apiKey ? `&key=${encodeURIComponent(cfg.apiKey)}` : ''}`;
+
+        const bodyObj = {
+            context: cfg.fullContext || {
+                client: {
+                    clientName: 'WEB',
+                    clientVersion: cfg.clientVersion || '2.20260401.01.00',
+                    hl: 'es',
+                    gl: 'ES',
+                    ...(cfg.visitorData ? { visitorData: cfg.visitorData } : {})
+                }
+            },
+            videoId
+        };
+
+        try {
+            const resp = await peticionHttpBaja(urlNext, {
+                method: 'POST',
+                preferirFetch: true,
+                headers,
+                body: JSON.stringify(bodyObj),
+                timeout: 9000
+            });
+            if (resp.status === 200 && resp.text) {
+                const params = [];
+                const re = /"getTranscriptEndpoint"\s*:\s*\{\s*"params"\s*:\s*"([^"]+)"/g;
+                let m;
+                while ((m = re.exec(resp.text)) !== null) {
+                    if (m[1]) params.push(m[1]);
+                }
+                return Array.from(new Set(params));
+            }
+        } catch (e) {
+            if (e.esCancelacion || cancelado) throw e;
+        }
+        return [];
+    }
+
+    // Consulta /youtubei/v1/player con clientes ANDROID / IOS / MWEB / WEB_EMBEDDED (que entregan URLs de subtítulos sin exigencia de PO Token de navegador)
+    async function obtenerPlayerMultiCliente(videoId, visitorDataOverride = '') {
+        verificarCancelacion();
+        const cfg = obtenerConfigYtcfg();
+        const urlPlayer = `https://www.youtube.com/youtubei/v1/player?prettyPrint=false${cfg.apiKey ? `&key=${encodeURIComponent(cfg.apiKey)}` : ''}`;
+        const vData = visitorDataOverride || cfg.visitorData || '';
+
+        for (const cli of CLIENTES_INNERTUBE) {
+            verificarCancelacion();
+            try {
+                const payload = {
+                    context: {
+                        client: {
+                            ...cli.context,
+                            ...(vData ? { visitorData: vData } : {})
+                        },
+                        ...(cli.nombre === 'WEB_EMBEDDED_PLAYER'
+                            ? { thirdParty: { embedUrl: 'https://www.youtube.com/' } }
+                            : {})
+                    },
+                    videoId,
+                    contentCheckOk: true,
+                    racyCheckOk: true,
+                    ...(cfg.sts ? { playbackContext: { contentPlaybackContext: { signatureTimestamp: Number(cfg.sts) } } } : {})
+                };
+
+                const headersCli = {
+                    'Content-Type': 'application/json',
+                    'X-Youtube-Client-Name': cli.id,
+                    'X-Youtube-Client-Version': cli.context.clientVersion,
+                    'Origin': 'https://www.youtube.com',
+                    'X-Origin': 'https://www.youtube.com',
+                    ...(vData ? { 'X-Goog-Visitor-Id': vData } : {}),
+                    ...(cli.ua ? { 'User-Agent': cli.ua } : {})
+                };
+
+                // Intento 1: anónimo (Android/iOS funcionan de maravilla sin cookies de navegador web)
+                for (const modoAnonimo of [true, false]) {
+                    verificarCancelacion();
+                    const hFinal = { ...headersCli };
+                    if (!modoAnonimo) {
+                        const auth = await calcularSapisidHash('https://www.youtube.com');
+                        if (auth) hFinal['Authorization'] = auth;
+                    }
+                    const resp = await peticionHttpBaja(urlPlayer, {
+                        method: 'POST',
+                        headers: hFinal,
+                        body: JSON.stringify(payload),
+                        anonymous: modoAnonimo,
+                        timeout: 8000
+                    });
+
+                    if (resp.status === 200 && resp.text) {
+                        const pr = JSON.parse(resp.text);
+                        const pistas = extraerPistasDePlayerResponse(pr);
+                        if (pistas.length > 0) {
+                            return {
+                                cliente: cli.nombre,
+                                pr,
+                                pistas,
+                                titulo: texto(pr?.videoDetails?.title || ''),
+                                fecha: extraerFechaPublicacion(pr),
+                                playabilityStatus: pr?.playabilityStatus?.status || 'OK'
+                            };
+                        }
+                    }
+                }
+            } catch (e) {
+                if (e.esCancelacion || cancelado) throw e;
+            }
+        }
+        return null;
+    }
+
+    // ==================================================
+    // NÚCLEO DE FORMATEO DE SUBTÍTULOS (BLOQUES DE 200 CARACTERES)
+    // ==================================================
 
     const ENTIDADES_HTML = Object.freeze({
         amp: '&',
@@ -1973,7 +1756,6 @@
         nbsp: ' '
     });
 
-    // Dos pasadas porque YouTube suele entregar entidades doblemente escapadas en XML timedtext (&amp;#39;).
     function decodeHtmlEntities(raw) {
         let str = String(raw ?? '');
         for (let pase = 0; pase < 2; pase++) {
@@ -2023,15 +1805,6 @@
         });
     }
 
-    function parseClockTimeToSeconds(val) {
-        const s = String(val || '').trim();
-        if (!s) return 0;
-        const parts = s.split(':').map(Number);
-        if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-        if (parts.length === 2) return parts[0] * 60 + parts[1];
-        return Number(s) || 0;
-    }
-
     function parseYouTubeSubtitles(xml) {
         const cues = [];
         const reText = /<text\b([^>]*)>([\s\S]*?)<\/text>/gi;
@@ -2062,12 +1835,8 @@
                 const mDur = attrs.match(/\bdur\s*=\s*["']([^"']+)["']/i);
                 const limpio = rawBody.replace(/<[^>]+>/g, '').trim();
                 if (limpio) {
-                    const startVal = mT
-                        ? (parseFloat(mT[1]) || 0) / 1000
-                        : parseFloat(mStart ? mStart[1] : '0') || 0;
-                    const durVal = mD
-                        ? (parseFloat(mD[1]) || 0) / 1000
-                        : parseFloat(mDur ? mDur[1] : '0') || 0;
+                    const startVal = mT ? (parseFloat(mT[1]) || 0) / 1000 : (parseFloat(mStart ? mStart[1] : '0') || 0);
+                    const durVal = mD ? (parseFloat(mD[1]) || 0) / 1000 : (parseFloat(mDur ? mDur[1] : '0') || 0);
                     cues.push({
                         text: limpio,
                         start: startVal,
@@ -2095,31 +1864,29 @@
 
     function parseSubtitleVTT(vttText) {
         const cues = [];
-        String(vttText || '')
-            .replace(/\r/g, '')
-            .split(/\n\n+/)
-            .forEach(block => {
-                const lines = block
-                    .split('\n')
-                    .map(l => l.trim())
-                    .filter(Boolean);
-                if (!lines.length || lines[0] === 'WEBVTT') return;
-                const timeIndex = lines.findIndex(l => l.includes('-->'));
-                if (timeIndex < 0) return;
-                const parts = lines[timeIndex].split('-->');
-                if (parts.length < 2) return;
-                const start = parseClockTimeToSeconds(parts[0].trim());
-                const end = parseClockTimeToSeconds(parts[1].trim().split(/\s+/)[0]);
-                const dur = Math.max(0, end - start);
-                const text = lines
-                    .slice(timeIndex + 1)
-                    .join(' ')
-                    .replace(/<[^>]*>/g, '')
-                    .replace(/\s+/g, ' ')
-                    .trim();
-                if (text) cues.push({ start, dur, text });
-            });
+        String(vttText || '').replace(/\r/g, '').split(/\n\n+/).forEach(block => {
+            const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
+            if (!lines.length || lines[0] === 'WEBVTT') return;
+            const timeIndex = lines.findIndex(l => l.includes('-->'));
+            if (timeIndex < 0) return;
+            const parts = lines[timeIndex].split('-->');
+            if (parts.length < 2) return;
+            const start = parseClockTimeToSeconds(parts[0].trim());
+            const end = parseClockTimeToSeconds(parts[1].trim().split(/\s+/)[0]);
+            const dur = Math.max(0, end - start);
+            const text = lines.slice(timeIndex + 1).join(' ').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+            if (text) cues.push({ start, dur, text });
+        });
         return toSubtitles(cues);
+    }
+
+    function parseClockTimeToSeconds(val) {
+        const s = String(val || '').trim();
+        if (!s) return 0;
+        const parts = s.split(':').map(Number);
+        if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+        if (parts.length === 2) return parts[0] * 60 + parts[1];
+        return Number(s) || 0;
     }
 
     function decodeSubtitles(subtitles) {
@@ -2147,9 +1914,7 @@
         let length = 0;
 
         originals.forEach((sub, index) => {
-            const raw = String(sub.text ?? '')
-                .replace(/\s+/g, ' ')
-                .trim();
+            const raw = String(sub.text ?? '').replace(/\s+/g, ' ').trim();
             if (!raw) return;
 
             const textSegment = {
@@ -2197,10 +1962,16 @@
         const units = construirBloquesSubtitulos(originals, CFG.BLOCK_SIZE);
         const url = videoId ? `https://youtu.be/${videoId}` : '';
 
-        const head = CFG.EXPORT_HEADER ? [title, url].filter(Boolean).join('\n') + '\n\n' : '';
+        const head = CFG.EXPORT_HEADER
+            ? [title, url].filter(Boolean).join('\n') + '\n\n'
+            : '';
 
         const cuerpo = units
-            .map(unit => (CFG.EXPORT_TIME ? `${formatTxtTime(unit.start)}\n` : '') + unit.text)
+            .map(
+                unit =>
+                    (CFG.EXPORT_TIME ? `${formatTxtTime(unit.start)}\n` : '') +
+                    unit.text
+            )
             .join('\n\n');
 
         return head + cuerpo;
@@ -2231,12 +2002,12 @@
         return `${urlFirmada}${sep}${clave}=${encodeURIComponent(valor)}`;
     }
 
-    function generarCandidatosSubtitulos(baseUrl, videoId, _codigoIdioma = 'es', _esAuto = false, necesitaTraducir = false) {
+    function generarCandidatosSubtitulos(baseUrl, videoId, codigoIdioma = 'es', esAuto = false, necesitaTraducir = false) {
         const candidatos = [];
 
         if (baseUrl) {
             const urlLimpia = baseUrl.replace(/\\u0026/g, '&');
-            const potParams = (videoId ? estado.potParamsByVideoId.get(videoId) : null) || estado.potLatestParams;
+            const potParams = (videoId ? _potParamsByVideoId.get(videoId) : null) || _potLatestParams;
 
             const aplicarPot = urlBase => {
                 if (!potParams || Object.keys(potParams).length === 0) return null;
@@ -2299,9 +2070,7 @@
                 const cues = parseYouTubeSubtitles(limpio);
                 if (cues && cues.length > 0) return cues;
             }
-        } catch {
-            // Formato no reconocido o respuesta incompleta.
-        }
+        } catch {}
 
         return null;
     }
@@ -2386,224 +2155,6 @@
         return decodeSubtitles(toSubtitles(cues)).filter(s => s.text.length > 0);
     }
 
-    // --- Módulo 8: Pipeline de extracción en 5 capas y regla azul estricta ---
-
-    // Pipeline de extracción en 5 capas por video (DOM vivo, /watch + /next, get_transcript, clientes móviles e iframe /watch).
-
-
-    function extraerFechaPublicacion(playerResponse, html = '') {
-        const mf = playerResponse?.microformat?.playerMicroformatRenderer;
-        const rawFecha =
-            mf?.publishDate ||
-            mf?.uploadDate ||
-            (html
-                ? html.match(/"publishDate"\s*:\s*"(\d{4}-\d{2}-\d{2})/)?.[1] ||
-                  html.match(/"uploadDate"\s*:\s*"(\d{4}-\d{2}-\d{2})/)?.[1] ||
-                  html.match(/itemprop="datePublished"\s+content="(\d{4}-\d{2}-\d{2})/)?.[1]
-                : '') ||
-            '';
-
-        const m = String(rawFecha).match(/^(\d{4}-\d{2}-\d{2})/);
-        return m ? m[1] : '0000-00-00';
-    }
-
-    function extraerPistasDePlayerResponse(pr) {
-        return (
-            pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks ||
-            pr?.captions?.playerCaptionsRenderer?.captionTracks ||
-            []
-        );
-    }
-
-    function extraerDatosLigerosDeHtmlWatch(html) {
-        if (!html || typeof html !== 'string') {
-            return {
-                titulo: '',
-                fecha: '0000-00-00',
-                pistas: [],
-                transcriptParams: [],
-                playabilityStatus: 'OK',
-                visitorData: ''
-            };
-        }
-
-        const transcriptParams = [];
-        const reTranscript = /"getTranscriptEndpoint"\s*:\s*\{\s*"params"\s*:\s*"([^"]+)"/g;
-        let m;
-        while ((m = reTranscript.exec(html)) !== null) {
-            if (m[1]) transcriptParams.push(m[1]);
-        }
-
-        let visitorData = '';
-        const mVis =
-            html.match(/"VISITOR_DATA"\s*:\s*"([^"]+)"/) ||
-            html.match(/"visitorData"\s*:\s*"([^"]+)"/);
-        if (mVis?.[1]) visitorData = mVis[1];
-
-        let fecha = '0000-00-00';
-        const mFecha =
-            html.match(/"publishDate"\s*:\s*"(\d{4}-\d{2}-\d{2})/) ||
-            html.match(/"uploadDate"\s*:\s*"(\d{4}-\d{2}-\d{2})/) ||
-            html.match(/itemprop="datePublished"\s+content="(\d{4}-\d{2}-\d{2})/);
-        if (mFecha?.[1]) fecha = mFecha[1];
-
-        let titulo = '';
-        let pistas = [];
-        let playabilityStatus = 'OK';
-
-        const idxCaptions = html.indexOf('"playerCaptionsTracklistRenderer":');
-        if (idxCaptions !== -1) {
-            const objCap = extraerJsonBalanceadoDesdeIndice(
-                html,
-                idxCaptions + '"playerCaptionsTracklistRenderer":'.length
-            );
-            if (Array.isArray(objCap?.captionTracks)) {
-                pistas = objCap.captionTracks;
-            }
-        }
-
-        const idxDetails = html.indexOf('"videoDetails":');
-        if (idxDetails !== -1) {
-            const objDet = extraerJsonBalanceadoDesdeIndice(html, idxDetails + '"videoDetails":'.length);
-            if (objDet?.title) {
-                titulo = texto(objDet.title);
-            }
-        }
-
-        const idxPlay = html.indexOf('"playabilityStatus":');
-        if (idxPlay !== -1) {
-            const objPlay = extraerJsonBalanceadoDesdeIndice(html, idxPlay + '"playabilityStatus":'.length);
-            if (objPlay?.status) {
-                playabilityStatus = objPlay.status;
-            }
-        }
-
-        return {
-            titulo,
-            fecha,
-            pistas,
-            transcriptParams: Array.from(new Set(transcriptParams)),
-            playabilityStatus,
-            visitorData
-        };
-    }
-
-    async function obtenerDatosViaInnertubeNext(videoId) {
-        verificarCancelacion();
-        const { headers, cfg } = await construirHeadersInnerTube(true);
-        const urlNext = `https://www.youtube.com/youtubei/v1/next?prettyPrint=false${cfg.apiKey ? `&key=${encodeURIComponent(cfg.apiKey)}` : ''}`;
-
-        const bodyObj = {
-            context: cfg.fullContext || {
-                client: {
-                    clientName: 'WEB',
-                    clientVersion: cfg.clientVersion || '2.20260401.01.00',
-                    hl: 'es',
-                    gl: 'ES',
-                    ...(cfg.visitorData ? { visitorData: cfg.visitorData } : {})
-                }
-            },
-            videoId
-        };
-
-        try {
-            const resp = await peticionHttpBaja(urlNext, {
-                method: 'POST',
-                preferirFetch: true,
-                headers,
-                body: JSON.stringify(bodyObj),
-                timeout: 9000
-            });
-            if (resp.status === 200 && resp.text) {
-                const params = [];
-                const re = /"getTranscriptEndpoint"\s*:\s*\{\s*"params"\s*:\s*"([^"]+)"/g;
-                let m;
-                while ((m = re.exec(resp.text)) !== null) {
-                    if (m[1]) params.push(m[1]);
-                }
-                return Array.from(new Set(params));
-            }
-        } catch (e) {
-            if (e.esCancelacion || estado.cancelado) throw e;
-        }
-        return [];
-    }
-
-    async function obtenerPlayerMultiCliente(videoId, visitorDataOverride = '') {
-        verificarCancelacion();
-        const cfg = obtenerConfigYtcfg();
-        const urlPlayer = `https://www.youtube.com/youtubei/v1/player?prettyPrint=false${cfg.apiKey ? `&key=${encodeURIComponent(cfg.apiKey)}` : ''}`;
-        const vData = visitorDataOverride || cfg.visitorData || '';
-
-        for (const cli of CLIENTES_INNERTUBE) {
-            verificarCancelacion();
-            try {
-                const payload = {
-                    context: {
-                        client: {
-                            ...cli.context,
-                            ...(vData ? { visitorData: vData } : {})
-                        },
-                        ...(cli.nombre === 'WEB_EMBEDDED_PLAYER'
-                            ? { thirdParty: { embedUrl: 'https://www.youtube.com/' } }
-                            : {})
-                    },
-                    videoId,
-                    contentCheckOk: true,
-                    racyCheckOk: true,
-                    ...(cfg.sts
-                        ? { playbackContext: { contentPlaybackContext: { signatureTimestamp: Number(cfg.sts) } } }
-                        : {})
-                };
-
-                const headersCli = {
-                    'Content-Type': 'application/json',
-                    'X-Youtube-Client-Name': cli.id,
-                    'X-Youtube-Client-Version': cli.context.clientVersion,
-                    Origin: 'https://www.youtube.com',
-                    'X-Origin': 'https://www.youtube.com',
-                    ...(vData ? { 'X-Goog-Visitor-Id': vData } : {}),
-                    ...(cli.ua ? { 'User-Agent': cli.ua } : {})
-                };
-
-                // Android e iOS suelen responder sin requerir cookies de sesión web.
-                for (const modoAnonimo of [true, false]) {
-                    verificarCancelacion();
-                    const hFinal = { ...headersCli };
-                    if (!modoAnonimo) {
-                        const auth = await calcularSapisidHash('https://www.youtube.com');
-                        if (auth) hFinal.Authorization = auth;
-                    }
-                    const resp = await peticionHttpBaja(urlPlayer, {
-                        method: 'POST',
-                        headers: hFinal,
-                        body: JSON.stringify(payload),
-                        anonymous: modoAnonimo,
-                        timeout: 8000
-                    });
-
-                    if (resp.status === 200 && resp.text) {
-                        const pr = JSON.parse(resp.text);
-                        const pistas = extraerPistasDePlayerResponse(pr);
-                        if (pistas.length > 0) {
-                            return {
-                                cliente: cli.nombre,
-                                pr,
-                                pistas,
-                                titulo: texto(pr?.videoDetails?.title || ''),
-                                fecha: extraerFechaPublicacion(pr),
-                                playabilityStatus: pr?.playabilityStatus?.status || 'OK'
-                            };
-                        }
-                    }
-                }
-            } catch (e) {
-                if (e.esCancelacion || estado.cancelado) throw e;
-            }
-        }
-        return null;
-    }
-
     async function extraerSubtitulosViaGetTranscript(videoId, pistaElegida = null, paramsExtraidosHtml = []) {
         verificarCancelacion();
         const { headers, cfg } = await construirHeadersInnerTube(true);
@@ -2649,7 +2200,7 @@
                     }
                 }
             } catch (e) {
-                if (e.esCancelacion || estado.cancelado) throw e;
+                if (e.esCancelacion || cancelado) throw e;
             }
         }
 
@@ -2661,8 +2212,8 @@
         const esAuto = pistaElegida?.kind === 'asr';
         const necesitaTraducir = !!pistaElegida?.necesitaTraducir;
 
-        if (estado.subtitulosCachePorVideoId.has(videoId)) {
-            const cuesCache = parsearPayloadSubtitulo(estado.subtitulosCachePorVideoId.get(videoId));
+        if (_subtitulosCachePorVideoId.has(videoId)) {
+            const cuesCache = parsearPayloadSubtitulo(_subtitulosCachePorVideoId.get(videoId));
             if (cuesCache && cuesCache.length > 0) {
                 return decodeSubtitles(cuesCache).filter(s => s.text.length > 0);
             }
@@ -2679,6 +2230,7 @@
         for (const candUrl of candidatos) {
             verificarCancelacion();
 
+            // Intento A: vía peticionHttpBaja (GM_xmlhttpRequest / fetch)
             for (const preferirFetch of [true, false]) {
                 try {
                     const res = await peticionHttpBaja(candUrl, {
@@ -2693,7 +2245,7 @@
                         }
                     }
                 } catch (e) {
-                    if (e.esCancelacion || estado.cancelado) throw e;
+                    if (e.esCancelacion || cancelado) throw e;
                 }
             }
         }
@@ -2701,22 +2253,34 @@
         return [];
     }
 
+    // Extracción infalible cuando el usuario está dentro de /watch?v=ID
     async function activarSubtitulosEnPlayerActivoDom(videoId) {
         try {
             if (!location.pathname.includes('/watch') || new URLSearchParams(location.search).get('v') !== videoId) {
                 return [];
             }
 
-            if (estado.transcriptJsonPorVideoId.has(videoId)) {
-                const sub = parsearRespuestaGetTranscript(JSON.parse(estado.transcriptJsonPorVideoId.get(videoId)));
+            // 1. Revisar si ya está en caché de get_transcript o timedtext
+            if (_transcriptJsonPorVideoId.has(videoId)) {
+                const sub = parsearRespuestaGetTranscript(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
                 if (sub.length > 0) return sub;
             }
-            if (estado.subtitulosCachePorVideoId.has(videoId)) {
-                const cues = parsearPayloadSubtitulo(estado.subtitulosCachePorVideoId.get(videoId));
+            if (_subtitulosCachePorVideoId.has(videoId)) {
+                const cues = parsearPayloadSubtitulo(_subtitulosCachePorVideoId.get(videoId));
                 if (cues && cues.length > 0) return decodeSubtitles(cues).filter(s => s.text.length > 0);
             }
 
-            activarSubtitulosMoviePlayer(false);
+            // 2. Activar subtítulos en movie_player y abrir panel de transcripción si existe
+            const player = win.document?.getElementById('movie_player');
+            if (player) {
+                player.loadModule?.('captions');
+                player.loadModule?.('cc');
+                const tracklist = player.getOption?.('captions', 'tracklist') || [];
+                const esp = tracklist.find(t => /^es/i.test(t.languageCode)) || tracklist[0];
+                if (esp) {
+                    player.setOption?.('captions', 'track', esp);
+                }
+            }
 
             const btnTranscriptDom = document.querySelector(
                 'ytd-video-description-transcript-section-renderer button, button[aria-label*="transcripci" i], button[aria-label*="transcript" i]'
@@ -2727,12 +2291,12 @@
 
             const inicio = Date.now();
             while (Date.now() - inicio < 3200) {
-                if (estado.transcriptJsonPorVideoId.has(videoId)) {
-                    const sub = parsearRespuestaGetTranscript(JSON.parse(estado.transcriptJsonPorVideoId.get(videoId)));
+                if (_transcriptJsonPorVideoId.has(videoId)) {
+                    const sub = parsearRespuestaGetTranscript(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
                     if (sub.length > 0) return sub;
                 }
-                if (estado.subtitulosCachePorVideoId.has(videoId)) {
-                    const cues = parsearPayloadSubtitulo(estado.subtitulosCachePorVideoId.get(videoId));
+                if (_subtitulosCachePorVideoId.has(videoId)) {
+                    const cues = parsearPayloadSubtitulo(_subtitulosCachePorVideoId.get(videoId));
                     if (cues && cues.length > 0) {
                         return decodeSubtitles(cues).filter(s => s.text.length > 0);
                     }
@@ -2742,9 +2306,7 @@
                     const domCues = [];
                     segsDom.forEach(nodo => {
                         const tTxt = nodo.querySelector('.segment-timestamp, [class*="timestamp"]')?.textContent?.trim() || '0:00';
-                        const bTxt =
-                            nodo.querySelector('.segment-text, yt-formatted-string, [class*="segment-text"]')?.textContent?.trim() ||
-                            '';
+                        const bTxt = nodo.querySelector('.segment-text, yt-formatted-string, [class*="segment-text"]')?.textContent?.trim() || '';
                         if (bTxt) domCues.push({ tTxt, bTxt });
                     });
                     const convertidos = convertirDomCuesASubtitulos(domCues);
@@ -2752,11 +2314,37 @@
                 }
                 await dormir(130);
             }
-        } catch {
-            // Devolver vacío para permitir capas posteriores.
-        }
+        } catch {}
         return [];
     }
+
+    function extraerFechaPublicacion(playerResponse, html = '') {
+        const mf = playerResponse?.microformat?.playerMicroformatRenderer;
+        const rawFecha =
+            mf?.publishDate ||
+            mf?.uploadDate ||
+            (html ? (
+                html.match(/"publishDate"\s*:\s*"(\d{4}-\d{2}-\d{2})/)?.[1] ||
+                html.match(/"uploadDate"\s*:\s*"(\d{4}-\d{2}-\d{2})/)?.[1] ||
+                html.match(/itemprop="datePublished"\s+content="(\d{4}-\d{2}-\d{2})/)?.[1]
+            ) : '') ||
+            '';
+
+        const m = String(rawFecha).match(/^(\d{4}-\d{2}-\d{2})/);
+        return m ? m[1] : '0000-00-00';
+    }
+
+    function extraerPistasDePlayerResponse(pr) {
+        return (
+            pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks ||
+            pr?.captions?.playerCaptionsRenderer?.captionTracks ||
+            []
+        );
+    }
+
+    // ==================================================
+    // PIPELINE MAESTRO DE EXTRACCIÓN (5 CAPAS DE INGENIERÍA ANTI-ROJO)
+    // ==================================================
 
     async function procesarVideoATxt(itemVideo) {
         verificarCancelacion();
@@ -2775,11 +2363,11 @@
             location.pathname.includes('/watch') &&
             new URLSearchParams(location.search).get('v') === videoId;
 
-        // Capa 0: estado vivo de /watch cuando el usuario está dentro del propio video.
+        // CAPA 0: Si estamos dentro del propio video (/watch), usar directamente el estado vivo de la página
         if (enMismoVideoWatch) {
             try {
-                const snap = obtenerSnapshotPagina(videoId);
-                const prDom = snap?.pr;
+                const playerDom = win.document?.getElementById('movie_player');
+                const prDom = playerDom?.getPlayerResponse?.() || win.ytInitialPlayerResponse;
                 if (prDom) {
                     if (prDom.videoDetails?.title) tituloReal = texto(prDom.videoDetails.title);
                     const fDom = extraerFechaPublicacion(prDom);
@@ -2790,8 +2378,8 @@
                         pistaUsada = elegirPistaSubtitulo(pistasDom);
                     }
                 }
-                if (snap?.initData) {
-                    const strInit = JSON.stringify(snap.initData);
+                if (win.ytInitialData) {
+                    const strInit = JSON.stringify(win.ytInitialData);
                     const re = /"getTranscriptEndpoint"\s*:\s*\{\s*"params"\s*:\s*"([^"]+)"/g;
                     let m;
                     while ((m = re.exec(strInit)) !== null) {
@@ -2801,12 +2389,10 @@
                         }
                     }
                 }
-            } catch {
-                // Continuar con descarga directa HTML + Innertube.
-            }
+            } catch {}
         }
 
-        // Capa 1: HTML ligero /watch + Innertube /next en paralelo.
+        // CAPA 1: Extracción ligera de HTML /watch + Innertube /next en paralelo para obtener fecha, título, pistas y getTranscriptEndpoint firmado
         if (!enMismoVideoWatch || fecha === '0000-00-00' || transcriptParamsHtml.length === 0) {
             try {
                 const [rawHtml, paramsNext] = await Promise.all([
@@ -2838,25 +2424,24 @@
                 }
                 transcriptParamsHtml = Array.from(new Set(transcriptParamsHtml));
             } catch (e) {
-                if (e.esCancelacion || estado.cancelado) throw e;
+                if (e.esCancelacion || cancelado) throw e;
             }
         }
 
-        // Capa 2: endpoint /youtubei/v1/get_transcript cuando no requiere traducción automática.
+        // CAPA 2: Descarga vía /youtubei/v1/get_transcript con los params oficiales (no requiere PO Token de reproductor)
         if (subtitulos.length === 0 && (transcriptParamsHtml.length > 0 || tuvoPistas)) {
             if (!pistaUsada?.necesitaTraducir || /^es/i.test(pistaUsada?.languageCode || 'es')) {
                 subtitulos = await extraerSubtitulosViaGetTranscript(videoId, pistaUsada, transcriptParamsHtml);
             }
         }
 
-        // Capa 3: clientes móviles Innertube (ANDROID, IOS, MWEB, WEB_EMBEDDED).
+        // CAPA 3: Multi-Cliente Innertube (/youtubei/v1/player con ANDROID, IOS, MWEB, WEB_EMBEDDED)
+        // Las pistas devueltas por clientes móviles tienen URLs firmadas que descargan el XML/JSON3 al primer intento sin bloqueo de PO Token.
         if (subtitulos.length === 0) {
             const infoMovil = await obtenerPlayerMultiCliente(videoId, visitorDataVideo);
             if (infoMovil) {
                 if (infoMovil.titulo && (!tituloReal || tituloReal === videoId)) tituloReal = infoMovil.titulo;
-                if (infoMovil.fecha && infoMovil.fecha !== '0000-00-00' && fecha === '0000-00-00') {
-                    fecha = infoMovil.fecha;
-                }
+                if (infoMovil.fecha && infoMovil.fecha !== '0000-00-00' && fecha === '0000-00-00') fecha = infoMovil.fecha;
                 if (infoMovil.pistas?.length > 0) {
                     tuvoPistas = true;
                     const pistaMovil = elegirPistaSubtitulo(infoMovil.pistas);
@@ -2868,20 +2453,22 @@
             }
         }
 
-        // Capa 4: pista web directa y activación en reproductor DOM si estamos en /watch.
+        // CAPA 4: Si la pista web normal ya tiene PO Token o funciona directo, probarla
         if (subtitulos.length === 0 && pistaUsada?.baseUrl) {
             subtitulos = await obtenerSubtitulosRobusto(pistaUsada, videoId, 'es');
         }
 
+        // Si estamos en /watch y aún no salió, activar el DOM del reproductor actual
         if (subtitulos.length === 0 && enMismoVideoWatch) {
             subtitulos = await activarSubtitulosEnPlayerActivoDom(videoId);
         }
 
+        // Si la pista era en otro idioma y get_transcript está disponible, usar get_transcript antes de ir al iframe
         if (subtitulos.length === 0 && transcriptParamsHtml.length > 0) {
             subtitulos = await extraerSubtitulosViaGetTranscript(videoId, pistaUsada, transcriptParamsHtml);
         }
 
-        // Capa 5: pool de iframes reales /watch como respaldo definitivo.
+        // CAPA 5 (FALLBACK DEFINITIVO): Pool de Iframes /watch Reales con auto-apertura de CC y Panel de Transcripción
         if (subtitulos.length === 0 && !enMismoVideoWatch) {
             const resWorker = await extraerMedianteIframeWatchReal(videoId);
             if (resWorker) {
@@ -2900,9 +2487,7 @@
                         try {
                             const parsedTr = JSON.parse(resWorker.rawTranscriptJson);
                             subtitulos = parsearRespuestaGetTranscript(parsedTr);
-                        } catch {
-                            // Pasar al siguiente origen del worker.
-                        }
+                        } catch {}
                     }
                     if (subtitulos.length === 0 && resWorker.domTranscriptCues) {
                         subtitulos = convertirDomCuesASubtitulos(resWorker.domTranscriptCues);
@@ -2917,18 +2502,16 @@
                         subtitulos = await obtenerSubtitulosRobusto(pistaUsada, videoId, 'es');
                     }
                     if (subtitulos.length === 0 && resWorker.transcriptParams) {
-                        subtitulos = await extraerSubtitulosViaGetTranscript(videoId, pistaUsada, [
-                            resWorker.transcriptParams
-                        ]);
+                        subtitulos = await extraerSubtitulosViaGetTranscript(videoId, pistaUsada, [resWorker.transcriptParams]);
                     }
                 }
             }
         }
 
-        estado.subtitulosCachePorVideoId.delete(videoId);
-        estado.transcriptJsonPorVideoId.delete(videoId);
+        _subtitulosCachePorVideoId.delete(videoId);
+        _transcriptJsonPorVideoId.delete(videoId);
 
-        // Regla estricta del color azul: solo aplica cuando ninguna fuente reportó pistas disponibles.
+        // REGLA ESTRICTA DEL COLOR AZUL:
         if (!tuvoPistas && subtitulos.length === 0) {
             const err = new Error(
                 `No existe posibilidad de sacar subtítulos porque el video no tiene ninguno habilitado (${estadoPlayability})`
@@ -2938,7 +2521,9 @@
         }
 
         if (subtitulos.length === 0) {
-            throw new Error(`No se pudo extraer el cuerpo del subtítulo (${pistaUsada?.languageCode || 'es'})`);
+            throw new Error(
+                `No se pudo extraer el cuerpo del subtítulo (${pistaUsada?.languageCode || 'es'})`
+            );
         }
 
         const contenidoTxt = construirArchivoTxt(subtitulos, {
@@ -2961,19 +2546,20 @@
         };
     }
 
-    // --- Módulo 9: Descubrimiento de canal, listas (UULF/UUSH/UULV) y marcado DOM ---
-
-    // Detección del canal, conteo por listas (UULF/UUSH/UULV), paginación, marcado de tarjetas y armado de cola.
-
-
-    const UC_RE = /^UC[\w-]{22}$/;
+    // ==================================================
+    // DESCUBRIMIENTO DE CANAL Y CONTEO TOTAL DE VIDEOS (UULF / UUSH / UULV)
+    // ==================================================
 
     function enPantallaDeCanal() {
-        return /^\/(?:@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)(?:\/|$)/i.test(location.pathname);
+        return /^\/(?:@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)(?:\/|$)/i.test(
+            location.pathname
+        );
     }
 
     function obtenerClaveCanalUrl() {
-        const m = location.pathname.match(/^\/(@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)/i);
+        const m = location.pathname.match(
+            /^\/(@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)/i
+        );
         return m ? m[1].toLowerCase() : '';
     }
 
@@ -2985,7 +2571,9 @@
             return seguro(deJson, 'Canal de YouTube');
         }
 
-        const h1 = document.querySelector('yt-page-header-view-model h1, #channel-name #text, ytd-channel-name #text');
+        const h1 = document.querySelector(
+            'yt-page-header-view-model h1, #channel-name #text, ytd-channel-name #text'
+        );
         if (h1 && texto(h1.textContent)) {
             return seguro(h1.textContent, 'Canal de YouTube');
         }
@@ -2994,53 +2582,45 @@
         return seguro(t, 'Canal de YouTube');
     }
 
-    function resolverChannelIdInstantaneo(snap = null) {
+    const UC_RE = /^UC[\w-]{22}$/;
+
+    function resolverChannelIdInstantaneo() {
         const metaVal = document.querySelector('meta[itemprop="channelId"]')?.getAttribute('content');
         if (metaVal && UC_RE.test(metaVal)) return metaVal;
 
-        const canonicalMatch = (document.querySelector('link[rel="canonical"]')?.getAttribute('href') || '').match(
-            /\/channel\/(UC[\w-]{22})/
-        );
+        const canonicalMatch = (document.querySelector('link[rel="canonical"]')?.getAttribute('href') || '')
+            .match(/\/channel\/(UC[\w-]{22})/);
         if (canonicalMatch?.[1]) return canonicalMatch[1];
 
         const browseNode = document.querySelector('ytd-browse[page-subtype="channels"], ytd-browse');
         const attrId = browseNode?.getAttribute?.('channel-id') || browseNode?.getAttribute?.('external-id');
         if (attrId && UC_RE.test(attrId)) return attrId;
 
-        const canalHref = document.querySelector(
-            'ytd-channel-name a[href*="/channel/UC"], #channel-name a[href*="/channel/UC"], a[href^="/channel/UC"]'
-        );
+        const canalHref = document.querySelector('ytd-channel-name a[href*="/channel/UC"], #channel-name a[href*="/channel/UC"], a[href^="/channel/UC"]');
         const hrefMatch = (canalHref?.getAttribute('href') || '').match(/\/channel\/(UC[\w-]{22})/);
         if (hrefMatch?.[1]) return hrefMatch[1];
 
-        const actual = snap || obtenerSnapshotPagina();
-
         try {
-            const initData = actual?.initData;
+            const initData = win.ytInitialData;
             const deInit =
                 initData?.metadata?.channelMetadataRenderer?.externalId ||
                 initData?.header?.c4TabbedHeaderRenderer?.channelId;
             if (deInit && UC_RE.test(deInit)) return deInit;
 
-            const rows =
-                initData?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel?.metadata
-                    ?.contentMetadataViewModel?.metadataRows || [];
+            const rows = initData?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel
+                ?.metadata?.contentMetadataViewModel?.metadataRows || [];
             for (const row of rows) {
                 for (const part of row.metadataParts || []) {
                     const txt = part?.text?.content || '';
                     if (UC_RE.test(txt)) return txt;
                 }
             }
-        } catch {
-            // Ignorar si ytInitialData aún no se hidrata en la navegación SPA.
-        }
+        } catch {}
 
         try {
-            const cfgId = actual?.ytcfg?.channelId;
+            const cfgId = win.ytcfg?.get?.('CHANNEL_ID');
             if (cfgId && UC_RE.test(cfgId)) return cfgId;
-        } catch {
-            // Ignorar.
-        }
+        } catch {}
 
         const urlMatch = location.pathname.match(/\/channel\/(UC[\w-]{22})/);
         if (urlMatch?.[1]) return urlMatch[1];
@@ -3048,12 +2628,10 @@
         return null;
     }
 
-    function obtenerConteoAproximadoHeader(snap = null) {
-        const actual = snap || obtenerSnapshotPagina();
+    function obtenerConteoAproximadoHeader() {
         try {
-            const rows =
-                actual?.initData?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel?.metadata
-                    ?.contentMetadataViewModel?.metadataRows || [];
+            const rows = win.ytInitialData?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel
+                ?.metadata?.contentMetadataViewModel?.metadataRows || [];
             for (const fila of rows) {
                 for (const parte of fila.metadataParts || []) {
                     const txt = parte?.text?.content || '';
@@ -3062,9 +2640,7 @@
                     }
                 }
             }
-        } catch {
-            // Seguir al respaldo sobre nodos visibles del encabezado.
-        }
+        } catch {}
 
         const nodos = document.querySelectorAll(
             'yt-page-header-view-model span, ytd-channel-name span, #channel-header span, #meta span'
@@ -3080,11 +2656,10 @@
     }
 
     async function resolverDatosCanalActual() {
-        const snap = obtenerSnapshotPagina();
-        let channelId = resolverChannelIdInstantaneo(snap);
-        let clientVersion = snap?.ytcfg?.clientVersion || '2.20260401.01.00';
-        let nombreCanal = obtenerNombreCanalDom(snap?.initData);
-        let textoTotalHeader = obtenerConteoAproximadoHeader(snap);
+        let channelId = resolverChannelIdInstantaneo();
+        let clientVersion = win.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') || '2.20260401.01.00';
+        let nombreCanal = obtenerNombreCanalDom(win.ytInitialData);
+        let textoTotalHeader = obtenerConteoAproximadoHeader();
 
         if (channelId && nombreCanal) {
             return {
@@ -3116,7 +2691,8 @@
 
         if ((!clientVersion || clientVersion === '2.20260401.01.00') && htmlCanal) {
             clientVersion =
-                htmlCanal.match(/"INNERTUBE_CLIENT_VERSION"\s*:\s*"([^"]+)"/)?.[1] || clientVersion;
+                htmlCanal.match(/"INNERTUBE_CLIENT_VERSION"\s*:\s*"([^"]+)"/)?.[1] ||
+                clientVersion;
         }
 
         htmlCanal = '';
@@ -3128,8 +2704,8 @@
         if (!textoTotalHeader && initialData) {
             try {
                 const filasMeta =
-                    initialData?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel?.metadata
-                        ?.contentMetadataViewModel?.metadataRows || [];
+                    initialData?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel
+                        ?.metadata?.contentMetadataViewModel?.metadataRows || [];
                 for (const fila of filasMeta) {
                     for (const parte of fila.metadataParts || []) {
                         const txt = parte?.text?.content || '';
@@ -3138,9 +2714,7 @@
                         }
                     }
                 }
-            } catch {
-                // El canal puede ocultar el total en el encabezado.
-            }
+            } catch {}
         }
 
         return {
@@ -3161,7 +2735,9 @@
         try {
             const numTxt =
                 data?.header?.playlistHeaderRenderer?.numVideosText?.simpleText ||
-                data?.header?.playlistHeaderRenderer?.numVideosText?.runs?.map(r => r.text).join('') ||
+                data?.header?.playlistHeaderRenderer?.numVideosText?.runs
+                    ?.map(r => r.text)
+                    .join('') ||
                 '';
             if (numTxt && !/[kKmM]\b/.test(numTxt)) {
                 const n = extraerNumeroEnteroDeTexto(numTxt);
@@ -3169,10 +2745,13 @@
             }
 
             const stats =
-                data?.sidebar?.playlistSidebarRenderer?.items?.[0]?.playlistSidebarPrimaryInfoRenderer
-                    ?.stats;
+                data?.sidebar?.playlistSidebarRenderer?.items?.[0]
+                    ?.playlistSidebarPrimaryInfoRenderer?.stats;
             if (Array.isArray(stats) && stats[0]) {
-                const txt = stats[0].simpleText || stats[0].runs?.map(r => r.text).join('') || '';
+                const txt =
+                    stats[0].simpleText ||
+                    stats[0].runs?.map(r => r.text).join('') ||
+                    '';
                 if (!/[kKmM]\b/.test(txt)) {
                     const n = extraerNumeroEnteroDeTexto(txt);
                     if (Number.isFinite(n)) return n;
@@ -3180,8 +2759,8 @@
             }
 
             const rows =
-                data?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel?.metadata
-                    ?.contentMetadataViewModel?.metadataRows || [];
+                data?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel
+                    ?.metadata?.contentMetadataViewModel?.metadataRows || [];
             for (const r of rows) {
                 for (const p of r.metadataParts || []) {
                     const txt = p?.text?.content || '';
@@ -3191,9 +2770,7 @@
                     }
                 }
             }
-        } catch {
-            // Estructuras variables según layout del canal.
-        }
+        } catch {}
         return null;
     }
 
@@ -3249,8 +2826,14 @@
                 const slvm = obj.shortsLockupViewModel;
                 const url = slvm.onTap?.innertubeCommand?.commandMetadata?.webCommandMetadata?.url || '';
                 const mShort = url.match(/\/shorts\/([\w-]{11})/);
-                const videoId = mShort?.[1] || slvm.onTap?.innertubeCommand?.reelWatchEndpoint?.videoId || '';
-                const nombre = slvm.overlayMetadata?.primaryText?.content || slvm.accessibilityText || videoId;
+                const videoId =
+                    mShort?.[1] ||
+                    slvm.onTap?.innertubeCommand?.reelWatchEndpoint?.videoId ||
+                    '';
+                const nombre =
+                    slvm.overlayMetadata?.primaryText?.content ||
+                    slvm.accessibilityText ||
+                    videoId;
                 if (videoId) {
                     videos.push({
                         videoId,
@@ -3306,7 +2889,11 @@
                 return { conteo: 0, videos: [], tokenContinuacion: null, ok: false };
             }
 
-            const { videos, tokenContinuacion } = extraerItemsYContinuacionDePlaylist(data.contents, categoria);
+            const { videos, tokenContinuacion } = extraerItemsYContinuacionDePlaylist(
+                data.contents,
+                categoria
+            );
+
             const conteoCabecera = parsearConteoPlaylist(data);
             const conteo = Math.max(conteoCabecera || 0, videos.length);
 
@@ -3322,22 +2909,25 @@
     }
 
     async function cargarContinuacionPlaylist(token, clientVersion, categoria) {
-        const resTxt = await fetchTexto('https://www.youtube.com/youtubei/v1/browse?prettyPrint=false', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                context: {
-                    client: {
-                        clientName: 'WEB',
-                        clientVersion: clientVersion || '2.20260401.01.00',
-                        hl: 'es'
-                    }
+        const resTxt = await fetchTexto(
+            'https://www.youtube.com/youtubei/v1/browse?prettyPrint=false',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
                 },
-                continuation: token
-            })
-        });
+                body: JSON.stringify({
+                    context: {
+                        client: {
+                            clientName: 'WEB',
+                            clientVersion: clientVersion || '2.20260401.01.00',
+                            hl: 'es'
+                        }
+                    },
+                    continuation: token
+                })
+            }
+        );
 
         const data = JSON.parse(resTxt);
         return extraerItemsYContinuacionDePlaylist(
@@ -3376,7 +2966,11 @@
         for (const a of raiz.querySelectorAll(selectores)) {
             const href = a.getAttribute('href') || '';
             let videoId = '';
-            let categoria = esTabShorts ? 'Shorts' : esTabStreams ? 'En vivo' : 'Videos';
+            let categoria = esTabShorts
+                ? 'Shorts'
+                : esTabStreams
+                  ? 'En vivo'
+                  : 'Videos';
 
             const mWatch = href.match(/[?&]v=([\w-]{11})/);
             const mShorts = href.match(/\/shorts\/([\w-]{11})/);
@@ -3402,8 +2996,8 @@
             const nombre =
                 texto(
                     tituloNodo?.getAttribute?.('title') ||
-                        tituloNodo?.getAttribute?.('aria-label') ||
-                        tituloNodo?.textContent
+                    tituloNodo?.getAttribute?.('aria-label') ||
+                    tituloNodo?.textContent
                 ) || videoId;
 
             vistos.add(videoId);
@@ -3417,6 +3011,10 @@
         return lista;
     }
 
+    // ==================================================
+    // COLOREADO DE TARJETAS DE VIDEO EN LA CUADRÍCULA DEL CANAL
+    // ==================================================
+
     function buscarTarjetaVideoDom(videoId) {
         if (!videoId) return null;
         const raiz = obtenerRaizCanalDom();
@@ -3428,9 +3026,9 @@
         );
     }
 
-    function colorearVideoDom(videoId, estadoFila, detalle) {
+    function colorearVideoDom(videoId, estado, detalle) {
         if (!videoId) return;
-        guardarEnMapaConLimite(estado.estadoFilas, videoId, { estado: estadoFila, detalle }, 500);
+        guardarEnMapaConLimite(estadoFilas, videoId, { estado, detalle }, 500);
 
         const card = buscarTarjetaVideoDom(videoId);
         if (!card) return;
@@ -3441,12 +3039,12 @@
             'maximus-fila-omitido',
             'maximus-fila-sin-subtitulos'
         );
-        card.classList.add(`maximus-fila-${estadoFila}`);
+        card.classList.add(`maximus-fila-${estado}`);
         card.title = detalle;
     }
 
     function restaurarColoresVideosDom() {
-        for (const [videoId, info] of estado.estadoFilas.entries()) {
+        for (const [videoId, info] of estadoFilas.entries()) {
             const card = buscarTarjetaVideoDom(videoId);
             if (card) {
                 card.classList.remove(
@@ -3461,163 +3059,11 @@
         }
     }
 
-    async function construirColaVideos(pc, onProgreso, onDescubrir) {
-        if (pc.modo === 'pantalla') {
-            const enDom = obtenerVideosEnPantallaDom();
-            if (!enDom.length) {
-                throw new Error('No se encontraron videos visibles en la pantalla actual');
-            }
-            return enDom;
-        }
+    // ==================================================
+    // CSS (ESTÉTICA MAXIMUS ORDEN + AZUL PARA VIDEOS SIN SUBTÍTULOS)
+    // ==================================================
 
-        if (!pc.conteoListo && typeof onDescubrir === 'function') {
-            onProgreso?.(pc, 0, 1, 'Obteniendo información del canal...');
-            await onDescubrir(pc);
-        }
-
-        const limiteGlobal =
-            pc.modo === 'ultimos'
-                ? Math.max(1, parseInt(pc.inputUltimos.value, 10) || CFG.ULTIMOS_DEFECTO)
-                : Infinity;
-
-        const cola = [];
-        const vistos = new Set();
-
-        for (const cat of CATEGORIAS) {
-            if (cola.length >= limiteGlobal) break;
-
-            const infoCat = pc.categoriasDescubiertas.get(cat.clave);
-            if (!infoCat || !infoCat.videos?.length) continue;
-
-            const listaCat = [...infoCat.videos];
-            let token = infoCat.tokenContinuacion;
-            let pagina = 1;
-
-            while (token && cola.length + listaCat.length < limiteGlobal && pagina < 100) {
-                verificarCancelacion();
-                onProgreso?.(
-                    pc,
-                    listaCat.length,
-                    infoCat.conteo || listaCat.length + 100,
-                    `Listando ${cat.clave} del canal (${listaCat.length}/${infoCat.conteo || '?'})...`
-                );
-
-                try {
-                    const sig = await cargarContinuacionPlaylist(token, pc.clientVersion, cat.clave);
-                    if (!sig.videos.length) break;
-                    listaCat.push(...sig.videos);
-                    token = sig.tokenContinuacion;
-                    pagina++;
-                } catch {
-                    break;
-                }
-            }
-
-            for (const v of listaCat) {
-                if (cola.length >= limiteGlobal) break;
-                if (vistos.has(v.videoId)) continue;
-                vistos.add(v.videoId);
-                cola.push({
-                    ...v,
-                    carpeta: cat.carpeta
-                });
-            }
-        }
-
-        if (cola.length < limiteGlobal && pc.infoGeneralUU) {
-            const infoUU = pc.infoGeneralUU;
-            let tokenUU = infoUU.tokenContinuacion;
-            let paginaUU = 1;
-
-            for (const v of infoUU.videos || []) {
-                if (cola.length >= limiteGlobal) break;
-                if (vistos.has(v.videoId)) continue;
-                vistos.add(v.videoId);
-                cola.push({
-                    ...v,
-                    carpeta: 'Videos'
-                });
-            }
-
-            while (tokenUU && cola.length < limiteGlobal && paginaUU < 100) {
-                verificarCancelacion();
-                onProgreso?.(
-                    pc,
-                    cola.length,
-                    pc.totalExactoCanal || cola.length + 100,
-                    `Listando videos del canal (${cola.length}/${pc.totalExactoCanal || '?'})...`
-                );
-                try {
-                    const sig = await cargarContinuacionPlaylist(tokenUU, pc.clientVersion, 'Videos');
-                    if (!sig.videos.length) break;
-                    for (const v of sig.videos) {
-                        if (cola.length >= limiteGlobal) break;
-                        if (vistos.has(v.videoId)) continue;
-                        vistos.add(v.videoId);
-                        cola.push({
-                            ...v,
-                            carpeta: 'Videos'
-                        });
-                    }
-                    tokenUU = sig.tokenContinuacion;
-                    paginaUU++;
-                } catch {
-                    break;
-                }
-            }
-        }
-
-        if (!cola.length) {
-            const fallbackDom = obtenerVideosEnPantallaDom();
-            if (fallbackDom.length) {
-                return fallbackDom.slice(0, limiteGlobal);
-            }
-            throw new Error('No se detectaron videos disponibles en este canal');
-        }
-
-        return cola;
-    }
-
-    // --- Módulo 10: Estilos CSS, barra de progreso por bloques y logo en botones ---
-
-    // Estilos CSS, barra de progreso por bloques, botones con logo en Base64 y puntos de anclaje en YouTube.
-
-
-    function crearLogoNodo() {
-        return crearElemento('img', {
-            className: 'maximus-logo',
-            src: LOGO_BASE64,
-            alt: ''
-        });
-    }
-
-    function crearBotonConLogo(props, etiquetaInicial) {
-        const spanTexto = crearElemento('span', {
-            className: 'maximus-boton-texto',
-            textContent: etiquetaInicial
-        });
-        return crearElemento('button', props, [crearLogoNodo(), spanTexto]);
-    }
-
-    function cambiarTextoBoton(boton, etiqueta) {
-        if (!boton) return;
-        let span = boton.querySelector('.maximus-boton-texto');
-        if (!span) {
-            boton.textContent = '';
-            boton.appendChild(crearLogoNodo());
-            span = crearElemento('span', { className: 'maximus-boton-texto' });
-            boton.appendChild(span);
-        }
-        span.textContent = etiqueta;
-    }
-
-    function obtenerTextoBoton(boton) {
-        if (!boton) return '';
-        const span = boton.querySelector('.maximus-boton-texto');
-        return span ? span.textContent : boton.textContent;
-    }
-
-    function inyectarCss() {
+    function css() {
         let style = document.getElementById('maximus-yt-css');
         if (!style) {
             style = document.createElement('style');
@@ -3669,11 +3115,7 @@
             }
 
             .maximus-boton {
-                display: inline-flex !important;
-                align-items: center !important;
-                justify-content: center !important;
-                gap: 6px !important;
-                padding: 0 11px !important;
+                padding: 0 12px !important;
                 background: #fff !important;
                 border: 1px solid #718399 !important;
                 border-radius: 4px !important;
@@ -3682,21 +3124,6 @@
                 cursor: pointer !important;
                 font: 600 12px Arial, sans-serif !important;
                 transition: background-color .15s, border-color .15s, color .15s;
-            }
-
-            .maximus-logo {
-                width: 16px !important;
-                height: 16px !important;
-                flex: 0 0 16px !important;
-                object-fit: contain !important;
-                pointer-events: none !important;
-                opacity: .9;
-            }
-
-            html[dark] .maximus-logo,
-            html[darker-dark-theme] .maximus-logo,
-            [dark] .maximus-logo {
-                filter: invert(1);
             }
 
             html[dark] .maximus-boton {
@@ -4023,6 +3450,10 @@
         `;
     }
 
+    // ==================================================
+    // BARRA TIPO TORRENT / SEEDER
+    // ==================================================
+
     function progreso(pc, n, total, mensaje) {
         if (!pc?.pct || !pc?.estado) return;
         const pctNum = total ? Math.round((n / total) * 100) : 0;
@@ -4047,7 +3478,7 @@
         }
     }
 
-    function pieza(pc, i, estadoPieza, nombre, detalle = '') {
+    function pieza(pc, i, estado, nombre, detalle = '') {
         if (!pc?.piezas?.length) return;
         const total = pc.totalItemsBarra || pc.piezas.length;
         const idxVisual = Math.min(
@@ -4056,39 +3487,43 @@
         );
         const nodo = pc.piezas[idxVisual];
         if (!nodo) return;
-        nodo.className = `maximus-pieza ${estadoPieza}`;
-        nodo.title = `${i + 1}. ${nombre}: ${detalle || estadoPieza}`;
+        nodo.className = `maximus-pieza ${estado}`;
+        nodo.title = `${i + 1}. ${nombre}: ${detalle || estado}`;
     }
 
-    function buscarAnclaDebajoSuscribirse(raiz) {
-        const scope = raiz || document;
+    // ==================================================
+    // MONTAJE DE LA CAJITA DEBAJO DEL BOTÓN DE SUSCRIBIRSE
+    // ==================================================
 
-        const accionesHeader = scope.querySelector(
+    function buscarAnclaDebajoSuscribirse() {
+        const raiz = obtenerRaizCanalDom();
+
+        const accionesHeader = raiz.querySelector(
             'yt-page-header-view-model yt-flexible-actions-view-model, ' +
-                'yt-page-header-view-model .ytPageHeaderViewModelFlexibleActions, ' +
-                'yt-page-header-view-model .ytFlexibleActionsViewModelHost, ' +
-                'yt-page-header-renderer yt-flexible-actions-view-model, ' +
-                '#page-header yt-flexible-actions-view-model, ' +
-                '#page-header .ytPageHeaderViewModelFlexibleActions, ' +
-                '#page-header .ytFlexibleActionsViewModelHost'
+            'yt-page-header-view-model .ytPageHeaderViewModelFlexibleActions, ' +
+            'yt-page-header-view-model .ytFlexibleActionsViewModelHost, ' +
+            'yt-page-header-renderer yt-flexible-actions-view-model, ' +
+            '#page-header yt-flexible-actions-view-model, ' +
+            '#page-header .ytPageHeaderViewModelFlexibleActions, ' +
+            '#page-header .ytFlexibleActionsViewModelHost'
         );
         if (accionesHeader?.parentElement) {
             return { contenedor: accionesHeader.parentElement, referenciaDespuesDe: accionesHeader };
         }
 
-        const infoHeader = scope.querySelector(
+        const infoHeader = raiz.querySelector(
             '.ytPageHeaderViewModelHeadlineInfo, ' +
-                '.yt-page-header-view-model__page-header-headline-info, ' +
-                '.page-header-view-model-wiz__page-header-headline-info, ' +
-                'yt-page-header-view-model .ytPageHeaderViewModelContent, ' +
-                'yt-page-header-view-model, ' +
-                '#page-header'
+            '.yt-page-header-view-model__page-header-headline-info, ' +
+            '.page-header-view-model-wiz__page-header-headline-info, ' +
+            'yt-page-header-view-model .ytPageHeaderViewModelContent, ' +
+            'yt-page-header-view-model, ' +
+            '#page-header'
         );
         if (infoHeader) {
             return { contenedor: infoHeader, referenciaDespuesDe: null };
         }
 
-        const clasico = scope.querySelector('#inner-header-container, #channel-header-container');
+        const clasico = raiz.querySelector('#inner-header-container, #channel-header-container');
         if (clasico) {
             return { contenedor: clasico, referenciaDespuesDe: null };
         }
@@ -4104,459 +3539,46 @@
         }
     }
 
-    // --- Módulo 11: Montaje de panel, botones de video/Shorts y arranque SPA ---
-
-    // Orquestador principal: panel de canal, cola concurrente, botones en videos/Shorts y arranque SPA.
-
-
-    function actualizarResumenEstadoModo(pc) {
-        if (!pc || estado.ocupado) return;
-
-        const enDom = obtenerVideosEnPantallaDom().length;
-        const btnPantalla = pc.botonesModo.find(b => b.dataset.modo === 'pantalla');
-        if (btnPantalla) {
-            btnPantalla.textContent = enDom > 0 ? `En pantalla (${enDom})` : 'En pantalla';
-        }
-
-        if (!pc.conteoListo) return;
-
-        if (pc.modo === 'pantalla') {
-            pc.pct.textContent = `0 / ${enDom}`;
-            pc.estado.textContent = `Modo En pantalla · ${enDom} videos visibles listos para descargar a TXT`;
-            return;
-        }
-
-        if (pc.modo === 'ultimos') {
-            const maxN = Math.max(1, parseInt(pc.inputUltimos.value, 10) || CFG.ULTIMOS_DEFECTO);
-            const objetivo = pc.totalExactoCanal > 0 ? Math.min(maxN, pc.totalExactoCanal) : maxN;
-            pc.pct.textContent = `0 / ${objetivo}`;
-            pc.estado.textContent = `Modo Últimos · Descargará los ${objetivo} videos más recientes (de ${pc.totalExactoCanal || '?'} disponibles)`;
-            return;
-        }
-
-        const desglose = [];
-        for (const cat of CATEGORIAS) {
-            const info = pc.categoriasDescubiertas.get(cat.clave);
-            if (info?.conteo > 0) {
-                desglose.push(`${info.conteo} ${cat.clave}`);
-            }
-        }
-
-        if (pc.totalExactoCanal > 0) {
-            pc.pct.textContent = `0 / ${pc.totalExactoCanal}`;
-            pc.estado.textContent = `Listo · ${pc.totalExactoCanal} videos disponibles en el canal (${desglose.join(' · ')})`;
-        } else {
-            pc.pct.textContent = `0 / ${enDom}`;
-            pc.estado.textContent = `Listo · ${enDom} videos detectados en pantalla (elige un modo para descargar)`;
-        }
-    }
-
-    function actualizarConteoEnPantallaUI() {
-        if (!estado.panelCanal || estado.ocupado) return;
-        const btnPantalla = estado.panelCanal.botonesModo.find(b => b.dataset.modo === 'pantalla');
-        if (btnPantalla) {
-            const nDom = obtenerVideosEnPantallaDom().length;
-            btnPantalla.textContent = nDom > 0 ? `En pantalla (${nDom})` : 'En pantalla';
-        }
-        if (estado.panelCanal.modo === 'pantalla') {
-            actualizarResumenEstadoModo(estado.panelCanal);
-        }
-    }
-
-    async function descubrirTotalesCanalEnSegundoPlano(pc) {
-        const miSeq = ++estado.seqDescubrimiento;
-
-        try {
-            const datos = await resolverDatosCanalActual();
-            if (miSeq !== estado.seqDescubrimiento || pc !== estado.panelCanal) return;
-
-            pc.channelId = datos.channelId;
-            pc.nombreCanal = datos.nombreCanal;
-            pc.clientVersion = datos.clientVersion;
-
-            if (datos.textoTotalHeader) {
-                pc.estado.textContent = `Canal: ${datos.nombreCanal} · ${datos.textoTotalHeader} detectados · Verificando desglose...`;
-                pc.pct.textContent = datos.textoTotalHeader;
-            }
-
-            if (!datos.channelId || !datos.channelId.startsWith('UC')) {
-                pc.conteoListo = true;
-                actualizarResumenEstadoModo(pc);
-                return;
-            }
-
-            const sufijo = datos.channelId.slice(2);
-
-            const promesasCategorias = CATEGORIAS.map(async cat => {
-                const playlistId = `${cat.prefijo}${sufijo}`;
-                const info = await consultarPrimeraPaginaPlaylist(playlistId, cat.clave);
-                return { cat, playlistId, info };
-            });
-
-            const promesaUU = consultarPrimeraPaginaPlaylist(`UU${sufijo}`, 'Videos');
-
-            const [resultados, infoUU] = await Promise.all([Promise.all(promesasCategorias), promesaUU]);
-
-            if (miSeq !== estado.seqDescubrimiento || pc !== estado.panelCanal) return;
-
-            let sumaTotal = 0;
-            for (const { cat, playlistId, info } of resultados) {
-                pc.categoriasDescubiertas.set(cat.clave, {
-                    ...info,
-                    playlistId,
-                    carpeta: cat.carpeta
-                });
-                sumaTotal += info.conteo;
-            }
-
-            if (infoUU?.conteo > sumaTotal) {
-                sumaTotal = infoUU.conteo;
-            }
-            if (infoUU?.videos?.length > 0) {
-                pc.infoGeneralUU = {
-                    ...infoUU,
-                    playlistId: `UU${sufijo}`,
-                    carpeta: 'Videos'
-                };
-            }
-
-            pc.totalExactoCanal = sumaTotal;
-            pc.conteoListo = true;
-
-            const btnTodos = pc.botonesModo.find(b => b.dataset.modo === 'todos');
-            if (btnTodos && sumaTotal > 0) {
-                btnTodos.textContent = `Todos (${sumaTotal})`;
-            }
-
-            actualizarResumenEstadoModo(pc);
-        } catch {
-            if (miSeq === estado.seqDescubrimiento && pc === estado.panelCanal) {
-                pc.conteoListo = true;
-                actualizarResumenEstadoModo(pc);
-            }
-        }
-    }
-
-    function empaquetarYDescargarZipFinal(
-        pc,
-        zip,
-        carpetaRaiz,
-        archivosParaMapa,
-        cabeceraLog,
-        ok,
-        errores,
-        sinSubtitulos,
-        totalProcesados,
-        fueParcial
-    ) {
-        archivosParaMapa.push({
-            ruta: `${carpetaRaiz}/_REPORTE.txt`,
-            comentario: 'Mapa de estructura de archivos y registro de transcripciones'
-        });
-
-        const mapaAscii = generarMapaArbol(carpetaRaiz, archivosParaMapa);
-
-        pc.log = [
-            ...cabeceraLog,
-            'ESTRUCTURA DE ARCHIVOS DEL CANAL:',
-            mapaAscii,
-            '',
-            'DETALLE DE OPERACIONES:',
-            ...pc.log.slice(cabeceraLog.length),
-            '',
-            `Total TXT: ${ok} | Sin subtítulos (Azul - el video no tiene): ${sinSubtitulos} | Errores: ${errores}`
-        ];
-
-        zip.agregar(`${carpetaRaiz}/_REPORTE.txt`, pc.log.join('\r\n'));
-
-        const blob = zip.generarBlob();
-        pc.zipBlob = blob;
-        pc.zipNombre = fueParcial
-            ? `${carpetaRaiz} (Parcial ${ok} TXT).zip`
-            : `${carpetaRaiz}.zip`;
-        pc.ultimoModoDescargado = pc.modo;
-
-        guardarZip(pc);
-
-        const mb = (blob.size / 1048576).toFixed(2);
-        const duracionTotal = formatearTiempoRestante((Date.now() - (pc.tiempoInicio || Date.now())) / 1000);
-        pc.pct.textContent = fueParcial ? `Detenido (${ok}/${totalProcesados})` : `100% (${ok}/${totalProcesados})`;
-        pc.estado.textContent = `${fueParcial ? 'ZIP parcial guardado' : 'Canal descargado'} (${mb} MB en ${duracionTotal}) · ${ok} TXT · 🔵 ${sinSubtitulos} sin subtítulos · ${errores} errores`;
-        cambiarTextoBoton(pc.boton, 'Guardar .zip');
-        pc.boton.classList.remove('detener');
-        pc.boton.classList.add('listo');
-        pc.boton.title = 'Clic: volver a guardar el ZIP al instante. Mayús + clic: volver a escanear el canal.';
-    }
-
-    async function ejecutarDescargaCanal(pc) {
-        if (estado.ocupado) return;
-        estado.ocupado = true;
-        estado.cancelado = false;
-
-        pc.boton.disabled = false;
-        pc.boton.classList.remove('listo');
-        pc.boton.classList.add('detener');
-        cambiarTextoBoton(pc.boton, 'Detener descarga');
-        pc.copiar.hidden = true;
-        pc.botonesModo.forEach(b => (b.disabled = true));
-        pc.inputUltimos.disabled = true;
-
-        if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-            Notification.requestPermission().catch(() => {});
-        }
-
-        if (pc.zipUrl) {
-            URL.revokeObjectURL(pc.zipUrl);
-            pc.zipUrl = null;
-        }
-        pc.zipBlob = null;
-
-        const nombreCanal = seguro(pc.nombreCanal || obtenerNombreCanalDom(), 'Canal de YouTube');
-        pc.nombreCanal = nombreCanal;
-        pc.tiempoInicio = Date.now();
-
-        const cabeceraLog = [
-            'Canal de YouTube a TXT v3.0.0 (Motor Multi-Cliente Innertube ANDROID/IOS/WEB + Next Transcript + Pool Iframes + Azul Estricto)',
-            `Canal: ${nombreCanal}`,
-            `Modo: ${pc.modo.toUpperCase()} (Concurrencia: ${CFG.CONCURRENCIA} hilos | Pool Iframes /watch: ${CFG.MAX_IFRAMES_SIMULTANEOS})`,
-            `Configuración: TXT | División: Bloques (${CFG.BLOCK_SIZE}) | Marcas de tiempo: Sí | Título y enlace: Sí`,
-            `Fecha: ${new Date().toLocaleString('es-CL')}`,
-            ''
-        ];
-        pc.log = [...cabeceraLog];
-
-        let ok = 0;
-        let errores = 0;
-        let sinSubtitulos = 0;
-
-        const zip = crearZipNativo();
-        const carpetaRaiz = seguro(nombreCanal);
-        const archivosParaMapa = [];
-
-        try {
-            const cola = await construirColaVideos(pc, progreso, descubrirTotalesCanalEnSegundoPlano);
-            verificarCancelacion();
-
-            crearPiezas(pc, cola);
-
-            const tiempoInicio = pc.tiempoInicio;
-            let indice = 0;
-            let procesados = 0;
-            const activos = new Map();
-
-            const actualizarProgreso = () => {
-                const etaTexto = calcularEta(procesados, cola.length, tiempoInicio);
-                const pctNum = cola.length ? Math.round((procesados / cola.length) * 100) : 0;
-                const etaBarra = etaTexto ? ` · ETA: ${etaTexto}` : '';
-                pc.pct.textContent = `${pctNum}% (${procesados}/${cola.length})${etaBarra}`;
-
-                if (activos.size > 0) {
-                    const primerActivo = activos.values().next().value;
-                    const subCarpeta = primerActivo.carpeta || primerActivo.categoria || 'Videos';
-                    const sufijoMas = activos.size > 1 ? ` (+${activos.size - 1} más)` : '';
-                    const etaEstado = etaTexto ? ` · ETA: ${etaTexto}` : '';
-                    progreso(
-                        pc,
-                        procesados,
-                        cola.length,
-                        `[${subCarpeta}] (${CFG.CONCURRENCIA} hilos${etaEstado} · ${procesados}/${cola.length}) Transcribiendo: ${primerActivo.nombre}${sufijoMas}`
-                    );
-                } else {
-                    const etaEstado = etaTexto ? ` · ETA: ${etaTexto}` : '';
-                    progreso(
-                        pc,
-                        procesados,
-                        cola.length,
-                        `Canal (${CFG.CONCURRENCIA} hilos${etaEstado}) · OK: ${ok} · Sin subtítulos (Azul): ${sinSubtitulos} · Errores: ${errores} (${procesados}/${cola.length})`
-                    );
-                }
-            };
-
-            const trabajador = async idWorker => {
-                while (indice < cola.length) {
-                    if (estado.cancelado) break;
-
-                    const i = indice++;
-                    if (i >= cola.length) break;
-
-                    const item = cola[i];
-                    const subCarpeta = item.carpeta || item.categoria || 'Videos';
-
-                    activos.set(idWorker, item);
-                    pieza(pc, i, 'procesando', item.nombre, 'Extrayendo transcripción...');
-                    actualizarProgreso();
-
-                    try {
-                        const resTxt = await procesarVideoATxt(item);
-                        if (estado.cancelado) break;
-
-                        const rutaBase = `${carpetaRaiz}/${seguro(subCarpeta)}`;
-                        const rutaFinal = rutaLibre(zip, rutaBase, resTxt.nombreArchivo);
-
-                        zip.agregar(rutaFinal, resTxt.bytes);
-                        ok++;
-
-                        const kb = (resTxt.bytes.byteLength / 1024).toFixed(1);
-                        const comentario = `Transcripción TXT (${resTxt.idioma}, ${resTxt.bloques} bloques) · ${kb} KB`;
-
-                        archivosParaMapa.push({
-                            ruta: rutaFinal,
-                            comentario
-                        });
-
-                        pieza(
-                            pc,
-                            i,
-                            'ok',
-                            `${resTxt.fecha} ${resTxt.titulo}`,
-                            `OK (${resTxt.idioma}) · ${kb} KB`
-                        );
-                        colorearVideoDom(item.videoId, 'ok', `Descargado: ${resTxt.nombreArchivo} (${resTxt.idioma})`);
-
-                        pc.log.push(`[OK] ${rutaFinal} (${resTxt.idioma} · ${kb} KB)`);
-                    } catch (e) {
-                        if (e.esCancelacion || estado.cancelado) break;
-
-                        if (e.noTieneSubtitulos) {
-                            sinSubtitulos++;
-                            const msgAzul = 'No existe posibilidad de sacar subtítulos porque el video no tiene ninguno habilitado.';
-                            pieza(pc, i, 'sin-subtitulos', item.nombre, `🔵 ${msgAzul}`);
-                            colorearVideoDom(item.videoId, 'sin-subtitulos', `🔵 ${msgAzul}`);
-                            pc.log.push(
-                                `[SIN SUBTÍTULOS - AZUL] ${subCarpeta}/${item.nombre} (https://youtu.be/${item.videoId}): ${msgAzul}`
-                            );
-                        } else {
-                            errores++;
-                            pieza(pc, i, 'error', item.nombre, e.message);
-                            colorearVideoDom(item.videoId, 'error', e.message);
-                            pc.log.push(
-                                `[ERROR] ${subCarpeta}/${item.nombre} (https://youtu.be/${item.videoId}): ${e.message}`
-                            );
-                        }
-                    } finally {
-                        activos.delete(idWorker);
-                        procesados++;
-                        actualizarProgreso();
-                    }
-
-                    if (CFG.PAUSA > 0) {
-                        await dormir(CFG.PAUSA);
-                    }
-                }
-            };
-
-            const numHilos = Math.min(CFG.CONCURRENCIA, cola.length);
-            const promesas = [];
-            for (let w = 0; w < numHilos; w++) {
-                promesas.push(trabajador(w));
-            }
-
-            await Promise.all(promesas);
-
-            verificarCancelacion();
-
-            archivosParaMapa.sort((a, b) => a.ruta.localeCompare(b.ruta, 'es', { numeric: true }));
-
-            empaquetarYDescargarZipFinal(
-                pc,
-                zip,
-                carpetaRaiz,
-                archivosParaMapa,
-                cabeceraLog,
-                ok,
-                errores,
-                sinSubtitulos,
-                cola.length,
-                false
-            );
-        } catch (e) {
-            if (e.esCancelacion || estado.cancelado) {
-                pc.log.push('[CANCELADO] Descarga detenida por el usuario');
-                if (ok > 0) {
-                    archivosParaMapa.sort((a, b) => a.ruta.localeCompare(b.ruta, 'es', { numeric: true }));
-                    empaquetarYDescargarZipFinal(
-                        pc,
-                        zip,
-                        carpetaRaiz,
-                        archivosParaMapa,
-                        cabeceraLog,
-                        ok,
-                        errores,
-                        sinSubtitulos,
-                        ok + errores + sinSubtitulos,
-                        true
-                    );
-                } else {
-                    zip.limpiarMemoria();
-                    pc.estado.textContent = 'Descarga detenida sin archivos procesados.';
-                    cambiarTextoBoton(pc.boton, 'Descargar .zip');
-                    pc.boton.classList.remove('detener', 'listo');
-                }
-            } else {
-                zip.limpiarMemoria();
-                pc.log.push(`[ERROR GENERAL] ${e.message}`);
-                pc.estado.textContent = `Error: ${e.message}`;
-                cambiarTextoBoton(pc.boton, 'Descargar .zip');
-                pc.boton.classList.remove('detener');
-                console.error('[Canal de YouTube a TXT]', e);
-            }
-        } finally {
-            limpiarTodosLosIframesTrabajadores();
-            estado.subtitulosCachePorVideoId.clear();
-            estado.transcriptJsonPorVideoId.clear();
-            restaurarColoresVideosDom();
-            pc.copiar.hidden = false;
-            pc.boton.disabled = false;
-            pc.boton.classList.remove('detener');
-            pc.botonesModo.forEach(b => (b.disabled = false));
-            pc.inputUltimos.disabled = false;
-            estado.cancelado = false;
-            estado.ocupado = false;
-        }
-    }
-
     function montarPanelCanal() {
         if (!enPantallaDeCanal()) {
-            if (estado.panelCanal?.panel?.isConnected && !estado.ocupado) {
-                if (estado.panelCanal.zipUrl) URL.revokeObjectURL(estado.panelCanal.zipUrl);
-                estado.panelCanal.panel.remove();
-                estado.panelCanal = null;
+            if (panelCanal?.panel?.isConnected && !ocupado) {
+                if (panelCanal.zipUrl) URL.revokeObjectURL(panelCanal.zipUrl);
+                panelCanal.panel.remove();
+                panelCanal = null;
             }
             return;
         }
 
         if (!document.getElementById('maximus-yt-css')) {
-            inyectarCss();
+            css();
         }
 
         restaurarColoresVideosDom();
 
-        const ancla = buscarAnclaDebajoSuscribirse(obtenerRaizCanalDom());
+        const ancla = buscarAnclaDebajoSuscribirse();
         if (!ancla) return;
 
         const claveActual = obtenerClaveCanalUrl();
 
-        if (estado.panelCanal && estado.panelCanal.claveCanal !== claveActual && !estado.ocupado) {
-            if (estado.panelCanal.zipUrl) URL.revokeObjectURL(estado.panelCanal.zipUrl);
-            if (estado.panelCanal.panel?.isConnected) estado.panelCanal.panel.remove();
-            estado.panelCanal = null;
+        if (panelCanal && panelCanal.claveCanal !== claveActual && !ocupado) {
+            if (panelCanal.zipUrl) URL.revokeObjectURL(panelCanal.zipUrl);
+            if (panelCanal.panel?.isConnected) panelCanal.panel.remove();
+            panelCanal = null;
         }
 
-        if (estado.panelCanal) {
-            if (!estado.panelCanal.panel.isConnected) {
-                insertarPanelEnAncla(estado.panelCanal.panel, ancla);
+        if (panelCanal) {
+            if (!panelCanal.panel.isConnected) {
+                insertarPanelEnAncla(panelCanal.panel, ancla);
             }
             actualizarConteoEnPantallaUI();
             return;
         }
 
-        const boton = crearBotonConLogo(
-            {
-                className: 'maximus-boton',
-                type: 'button'
-            },
-            'Descargar .zip'
-        );
+        const boton = crearElemento('button', {
+            className: 'maximus-boton',
+            type: 'button',
+            textContent: 'Descargar .zip'
+        });
 
         const btnCaptcha = crearElemento('button', {
             className: 'maximus-boton captcha',
@@ -4567,14 +3589,12 @@
         });
 
         btnCaptcha.addEventListener('click', () => {
-            if (estado.urlCaptchaActivo && !btnCaptcha.dataset.abierto) {
+            if (urlCaptchaActivo && !btnCaptcha.dataset.abierto) {
                 btnCaptcha.dataset.abierto = '1';
                 btnCaptcha.textContent = '✅ Ya lo resolví, ¡Continuar!';
                 try {
-                    window.open(estado.urlCaptchaActivo, '_blank');
-                } catch {
-                    // Ignorar si el navegador bloquea la pestaña emergente.
-                }
+                    window.open(urlCaptchaActivo, '_blank');
+                } catch {}
             } else {
                 delete btnCaptcha.dataset.abierto;
                 reanudarDespuesDeCaptcha();
@@ -4637,7 +3657,7 @@
 
         const barra = crearElemento('div', { className: 'maximus-barra' }, [pct]);
 
-        const estadoDiv = crearElemento('div', {
+        const estado = crearElemento('div', {
             className: 'maximus-estado',
             textContent: aproxHeader
                 ? `Canal: ${nombreCanalInicial} · ~${aproxHeader} detectados · Verificando desglose...`
@@ -4651,7 +3671,7 @@
             textContent: 'Copiar log'
         });
 
-        const pie = crearElemento('div', { className: 'maximus-pie' }, [estadoDiv, copiar]);
+        const pie = crearElemento('div', { className: 'maximus-pie' }, [estado, copiar]);
 
         const panel = crearElemento(
             'div',
@@ -4664,7 +3684,7 @@
 
         insertarPanelEnAncla(panel, ancla);
 
-        estado.panelCanal = {
+        panelCanal = {
             claveCanal: claveActual,
             channelId: '',
             nombreCanal: obtenerNombreCanalDom(),
@@ -4677,7 +3697,7 @@
             inputUltimos,
             barra,
             pct,
-            estado: estadoDiv,
+            estado,
             copiar,
             piezas: [],
             log: [],
@@ -4693,56 +3713,615 @@
             panel.addEventListener(evento, e => e.stopPropagation());
         }
 
-        estado.panelCanal.botonesModo.forEach(btn => {
+        panelCanal.botonesModo.forEach(btn => {
             btn.addEventListener('click', () => {
-                if (estado.ocupado) return;
+                if (ocupado) return;
                 const nuevoModo = btn.dataset.modo;
-                estado.panelCanal.modo = nuevoModo;
-                estado.panelCanal.botonesModo.forEach(b => b.classList.toggle('activo', b === btn));
-                estado.panelCanal.inputUltimos.hidden = nuevoModo !== 'ultimos';
+                panelCanal.modo = nuevoModo;
+                panelCanal.botonesModo.forEach(b =>
+                    b.classList.toggle('activo', b === btn)
+                );
+                panelCanal.inputUltimos.hidden = nuevoModo !== 'ultimos';
 
-                if (estado.panelCanal.zipBlob) {
-                    estado.panelCanal.boton.classList.remove('listo');
-                    cambiarTextoBoton(estado.panelCanal.boton, 'Descargar .zip');
+                if (panelCanal.zipBlob) {
+                    panelCanal.boton.classList.remove('listo');
+                    panelCanal.boton.textContent = 'Descargar .zip';
                 }
-                actualizarResumenEstadoModo(estado.panelCanal);
+                actualizarResumenEstadoModo(panelCanal);
             });
         });
 
-        estado.panelCanal.inputUltimos.addEventListener('input', () => {
-            if (estado.ocupado) return;
-            actualizarResumenEstadoModo(estado.panelCanal);
+        panelCanal.inputUltimos.addEventListener('input', () => {
+            if (ocupado) return;
+            actualizarResumenEstadoModo(panelCanal);
         });
 
-        estado.panelCanal.boton.addEventListener('click', evento => {
-            if (estado.ocupado) {
+        panelCanal.boton.addEventListener('click', evento => {
+            if (ocupado) {
                 cancelarDescargaActiva();
                 return;
             }
 
             if (
-                estado.panelCanal.zipBlob &&
+                panelCanal.zipBlob &&
                 !evento.shiftKey &&
-                estado.panelCanal.ultimoModoDescargado === estado.panelCanal.modo
+                panelCanal.ultimoModoDescargado === panelCanal.modo
             ) {
-                guardarZip(estado.panelCanal);
-                estado.panelCanal.estado.textContent = 'ZIP del canal descargado nuevamente.';
+                guardarZip(panelCanal);
+                panelCanal.estado.textContent = 'ZIP del canal descargado nuevamente.';
             } else {
-                ejecutarDescargaCanal(estado.panelCanal);
+                ejecutarDescargaCanal(panelCanal);
             }
         });
 
-        estado.panelCanal.copiar.addEventListener('click', async () => {
-            await copiarAlPortapapeles(estado.panelCanal.log.join('\n'));
-            const original = estado.panelCanal.copiar.textContent;
-            estado.panelCanal.copiar.textContent = '¡Log copiado!';
+        panelCanal.copiar.addEventListener('click', () => {
+            GM_setClipboard(panelCanal.log.join('\n'), 'text');
+            const original = panelCanal.copiar.textContent;
+            panelCanal.copiar.textContent = '¡Log copiado!';
             setTimeout(() => {
-                estado.panelCanal.copiar.textContent = original;
+                panelCanal.copiar.textContent = original;
             }, 1800);
         });
 
-        descubrirTotalesCanalEnSegundoPlano(estado.panelCanal);
+        descubrirTotalesCanalEnSegundoPlano(panelCanal);
     }
+
+    function actualizarConteoEnPantallaUI() {
+        if (!panelCanal || ocupado) return;
+        const btnPantalla = panelCanal.botonesModo.find(b => b.dataset.modo === 'pantalla');
+        if (btnPantalla) {
+            const nDom = obtenerVideosEnPantallaDom().length;
+            btnPantalla.textContent = nDom > 0 ? `En pantalla (${nDom})` : 'En pantalla';
+        }
+        if (panelCanal.modo === 'pantalla') {
+            actualizarResumenEstadoModo(panelCanal);
+        }
+    }
+
+    function actualizarResumenEstadoModo(pc) {
+        if (!pc || ocupado) return;
+
+        const enDom = obtenerVideosEnPantallaDom().length;
+        const btnPantalla = pc.botonesModo.find(b => b.dataset.modo === 'pantalla');
+        if (btnPantalla) {
+            btnPantalla.textContent = enDom > 0 ? `En pantalla (${enDom})` : 'En pantalla';
+        }
+
+        if (!pc.conteoListo) return;
+
+        if (pc.modo === 'pantalla') {
+            pc.pct.textContent = `0 / ${enDom}`;
+            pc.estado.textContent = `Modo En pantalla · ${enDom} videos visibles listos para descargar a TXT`;
+            return;
+        }
+
+        if (pc.modo === 'ultimos') {
+            const maxN = Math.max(1, parseInt(pc.inputUltimos.value, 10) || CFG.ULTIMOS_DEFECTO);
+            const objetivo = pc.totalExactoCanal > 0 ? Math.min(maxN, pc.totalExactoCanal) : maxN;
+            pc.pct.textContent = `0 / ${objetivo}`;
+            pc.estado.textContent = `Modo Últimos · Descargará los ${objetivo} videos más recientes (de ${pc.totalExactoCanal || '?'} disponibles)`;
+            return;
+        }
+
+        const desglose = [];
+        for (const cat of CATEGORIAS) {
+            const info = pc.categoriasDescubiertas.get(cat.clave);
+            if (info?.conteo > 0) {
+                desglose.push(`${info.conteo} ${cat.clave}`);
+            }
+        }
+
+        if (pc.totalExactoCanal > 0) {
+            pc.pct.textContent = `0 / ${pc.totalExactoCanal}`;
+            pc.estado.textContent = `Listo · ${pc.totalExactoCanal} videos disponibles en el canal (${desglose.join(' · ')})`;
+        } else {
+            pc.pct.textContent = `0 / ${enDom}`;
+            pc.estado.textContent = `Listo · ${enDom} videos detectados en pantalla (elige un modo para descargar)`;
+        }
+    }
+
+    async function descubrirTotalesCanalEnSegundoPlano(pc) {
+        const miSeq = ++seqDescubrimiento;
+
+        try {
+            const datos = await resolverDatosCanalActual();
+            if (miSeq !== seqDescubrimiento || pc !== panelCanal) return;
+
+            pc.channelId = datos.channelId;
+            pc.nombreCanal = datos.nombreCanal;
+            pc.clientVersion = datos.clientVersion;
+
+            if (datos.textoTotalHeader) {
+                pc.estado.textContent = `Canal: ${datos.nombreCanal} · ${datos.textoTotalHeader} detectados · Verificando desglose...`;
+                pc.pct.textContent = datos.textoTotalHeader;
+            }
+
+            if (!datos.channelId || !datos.channelId.startsWith('UC')) {
+                pc.conteoListo = true;
+                actualizarResumenEstadoModo(pc);
+                return;
+            }
+
+            const sufijo = datos.channelId.slice(2);
+
+            const promesasCategorias = CATEGORIAS.map(async cat => {
+                const playlistId = `${cat.prefijo}${sufijo}`;
+                const info = await consultarPrimeraPaginaPlaylist(playlistId, cat.clave);
+                return { cat, playlistId, info };
+            });
+
+            const promesaUU = consultarPrimeraPaginaPlaylist(`UU${sufijo}`, 'Videos');
+
+            const [resultados, infoUU] = await Promise.all([
+                Promise.all(promesasCategorias),
+                promesaUU
+            ]);
+
+            if (miSeq !== seqDescubrimiento || pc !== panelCanal) return;
+
+            let sumaTotal = 0;
+            for (const { cat, playlistId, info } of resultados) {
+                pc.categoriasDescubiertas.set(cat.clave, {
+                    ...info,
+                    playlistId,
+                    carpeta: cat.carpeta
+                });
+                sumaTotal += info.conteo;
+            }
+
+            if (infoUU?.conteo > sumaTotal) {
+                sumaTotal = infoUU.conteo;
+            }
+            if (infoUU?.videos?.length > 0) {
+                pc.infoGeneralUU = {
+                    ...infoUU,
+                    playlistId: `UU${sufijo}`,
+                    carpeta: 'Videos'
+                };
+            }
+
+            pc.totalExactoCanal = sumaTotal;
+            pc.conteoListo = true;
+
+            const btnTodos = pc.botonesModo.find(b => b.dataset.modo === 'todos');
+            if (btnTodos && sumaTotal > 0) {
+                btnTodos.textContent = `Todos (${sumaTotal})`;
+            }
+
+            actualizarResumenEstadoModo(pc);
+        } catch {
+            if (miSeq === seqDescubrimiento && pc === panelCanal) {
+                pc.conteoListo = true;
+                actualizarResumenEstadoModo(pc);
+            }
+        }
+    }
+
+    // ==================================================
+    // RECOLECCIÓN COMPLETA DE LA COLA DE VIDEOS SEGÚN EL MODO ELEGIDO
+    // ==================================================
+
+    async function construirColaVideos(pc) {
+        if (pc.modo === 'pantalla') {
+            const enDom = obtenerVideosEnPantallaDom();
+            if (!enDom.length) {
+                throw new Error('No se encontraron videos visibles en la pantalla actual');
+            }
+            return enDom;
+        }
+
+        if (!pc.conteoListo) {
+            progreso(pc, 0, 1, 'Obteniendo información del canal...');
+            await descubrirTotalesCanalEnSegundoPlano(pc);
+        }
+
+        const limiteGlobal =
+            pc.modo === 'ultimos'
+                ? Math.max(1, parseInt(pc.inputUltimos.value, 10) || CFG.ULTIMOS_DEFECTO)
+                : Infinity;
+
+        const cola = [];
+        const vistos = new Set();
+
+        for (const cat of CATEGORIAS) {
+            if (cola.length >= limiteGlobal) break;
+
+            const infoCat = pc.categoriasDescubiertas.get(cat.clave);
+            if (!infoCat || !infoCat.videos?.length) continue;
+
+            const listaCat = [...infoCat.videos];
+            let token = infoCat.tokenContinuacion;
+            let pagina = 1;
+
+            while (
+                token &&
+                cola.length + listaCat.length < limiteGlobal &&
+                pagina < 100
+            ) {
+                verificarCancelacion();
+                progreso(
+                    pc,
+                    listaCat.length,
+                    infoCat.conteo || listaCat.length + 100,
+                    `Listando ${cat.clave} del canal (${listaCat.length}/${infoCat.conteo || '?'})...`
+                );
+
+                try {
+                    const sig = await cargarContinuacionPlaylist(
+                        token,
+                        pc.clientVersion,
+                        cat.clave
+                    );
+                    if (!sig.videos.length) break;
+                    listaCat.push(...sig.videos);
+                    token = sig.tokenContinuacion;
+                    pagina++;
+                } catch {
+                    break;
+                }
+            }
+
+            for (const v of listaCat) {
+                if (cola.length >= limiteGlobal) break;
+                if (vistos.has(v.videoId)) continue;
+                vistos.add(v.videoId);
+                cola.push({
+                    ...v,
+                    carpeta: cat.carpeta
+                });
+            }
+        }
+
+        if (cola.length < limiteGlobal && pc.infoGeneralUU) {
+            const infoUU = pc.infoGeneralUU;
+            let tokenUU = infoUU.tokenContinuacion;
+            let paginaUU = 1;
+
+            for (const v of infoUU.videos || []) {
+                if (cola.length >= limiteGlobal) break;
+                if (vistos.has(v.videoId)) continue;
+                vistos.add(v.videoId);
+                cola.push({
+                    ...v,
+                    carpeta: 'Videos'
+                });
+            }
+
+            while (tokenUU && cola.length < limiteGlobal && paginaUU < 100) {
+                verificarCancelacion();
+                progreso(
+                    pc,
+                    cola.length,
+                    pc.totalExactoCanal || cola.length + 100,
+                    `Listando videos del canal (${cola.length}/${pc.totalExactoCanal || '?'})...`
+                );
+                try {
+                    const sig = await cargarContinuacionPlaylist(
+                        tokenUU,
+                        pc.clientVersion,
+                        'Videos'
+                    );
+                    if (!sig.videos.length) break;
+                    for (const v of sig.videos) {
+                        if (cola.length >= limiteGlobal) break;
+                        if (vistos.has(v.videoId)) continue;
+                        vistos.add(v.videoId);
+                        cola.push({
+                            ...v,
+                            carpeta: 'Videos'
+                        });
+                    }
+                    tokenUU = sig.tokenContinuacion;
+                    paginaUU++;
+                } catch {
+                    break;
+                }
+            }
+        }
+
+        if (!cola.length) {
+            const fallbackDom = obtenerVideosEnPantallaDom();
+            if (fallbackDom.length) {
+                return fallbackDom.slice(0, limiteGlobal);
+            }
+            throw new Error('No se detectaron videos disponibles en este canal');
+        }
+
+        return cola;
+    }
+
+    // ==================================================
+    // EJECUTAR DESCARGA DEL CANAL A TXT EN ZIP
+    // ==================================================
+
+    async function ejecutarDescargaCanal(pc) {
+        if (ocupado) return;
+        ocupado = true;
+        cancelado = false;
+
+        pc.boton.disabled = false;
+        pc.boton.classList.remove('listo');
+        pc.boton.classList.add('detener');
+        pc.boton.textContent = 'Detener descarga';
+        pc.copiar.hidden = true;
+        pc.botonesModo.forEach(b => (b.disabled = true));
+        pc.inputUltimos.disabled = true;
+
+        if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+            Notification.requestPermission().catch(() => {});
+        }
+
+        if (pc.zipUrl) {
+            URL.revokeObjectURL(pc.zipUrl);
+            pc.zipUrl = null;
+        }
+        pc.zipBlob = null;
+
+        const nombreCanal = seguro(pc.nombreCanal || obtenerNombreCanalDom(), 'Canal de YouTube');
+        pc.nombreCanal = nombreCanal;
+        pc.tiempoInicio = Date.now();
+
+        const cabeceraLog = [
+            'Canal de YouTube a TXT v3.0.0 (Motor Multi-Cliente Innertube ANDROID/IOS/WEB + Next Transcript + Pool Iframes + Azul Estricto)',
+            `Canal: ${nombreCanal}`,
+            `Modo: ${pc.modo.toUpperCase()} (Concurrencia: ${CFG.CONCURRENCIA} hilos | Pool Iframes /watch: ${CFG.MAX_IFRAMES_SIMULTANEOS})`,
+            `Configuración: TXT | División: Bloques (${CFG.BLOCK_SIZE}) | Marcas de tiempo: Sí | Título y enlace: Sí`,
+            `Fecha: ${new Date().toLocaleString('es-CL')}`,
+            ''
+        ];
+        pc.log = [...cabeceraLog];
+
+        let ok = 0;
+        let errores = 0;
+        let sinSubtitulos = 0;
+
+        const zip = crearZipNativo();
+        const carpetaRaiz = seguro(nombreCanal);
+        const archivosParaMapa = [];
+
+        try {
+            const cola = await construirColaVideos(pc);
+            verificarCancelacion();
+
+            crearPiezas(pc, cola);
+
+            const tiempoInicio = pc.tiempoInicio;
+            let indice = 0;
+            let procesados = 0;
+            const activos = new Map();
+
+            const actualizarProgreso = () => {
+                const etaTexto = calcularEta(procesados, cola.length, tiempoInicio);
+                const pctNum = cola.length ? Math.round((procesados / cola.length) * 100) : 0;
+                const etaBarra = etaTexto ? ` · ETA: ${etaTexto}` : '';
+                pc.pct.textContent = `${pctNum}% (${procesados}/${cola.length})${etaBarra}`;
+
+                if (activos.size > 0) {
+                    const primerActivo = activos.values().next().value;
+                    const subCarpeta = primerActivo.carpeta || primerActivo.categoria || 'Videos';
+                    const sufijoMas = activos.size > 1 ? ` (+${activos.size - 1} más)` : '';
+                    const etaEstado = etaTexto ? ` · ETA: ${etaTexto}` : '';
+                    progreso(
+                        pc,
+                        procesados,
+                        cola.length,
+                        `[${subCarpeta}] (${CFG.CONCURRENCIA} hilos${etaEstado} · ${procesados}/${cola.length}) Transcribiendo: ${primerActivo.nombre}${sufijoMas}`
+                    );
+                } else {
+                    const etaEstado = etaTexto ? ` · ETA: ${etaTexto}` : '';
+                    progreso(
+                        pc,
+                        procesados,
+                        cola.length,
+                        `Canal (${CFG.CONCURRENCIA} hilos${etaEstado}) · OK: ${ok} · Sin subtítulos (Azul): ${sinSubtitulos} · Errores: ${errores} (${procesados}/${cola.length})`
+                    );
+                }
+            };
+
+            const trabajador = async idWorker => {
+                while (indice < cola.length) {
+                    if (cancelado) break;
+
+                    const i = indice++;
+                    if (i >= cola.length) break;
+
+                    const item = cola[i];
+                    const subCarpeta = item.carpeta || item.categoria || 'Videos';
+
+                    activos.set(idWorker, item);
+                    pieza(pc, i, 'procesando', item.nombre, 'Extrayendo transcripción...');
+                    actualizarProgreso();
+
+                    try {
+                        const resTxt = await procesarVideoATxt(item);
+                        if (cancelado) break;
+
+                        const rutaBase = `${carpetaRaiz}/${seguro(subCarpeta)}`;
+                        const rutaFinal = rutaLibre(zip, rutaBase, resTxt.nombreArchivo);
+
+                        zip.agregar(rutaFinal, resTxt.bytes);
+                        ok++;
+
+                        const kb = (resTxt.bytes.byteLength / 1024).toFixed(1);
+                        const comentario = `Transcripción TXT (${resTxt.idioma}, ${resTxt.bloques} bloques) · ${kb} KB`;
+
+                        archivosParaMapa.push({
+                            ruta: rutaFinal,
+                            comentario
+                        });
+
+                        pieza(
+                            pc,
+                            i,
+                            'ok',
+                            `${resTxt.fecha} ${resTxt.titulo}`,
+                            `OK (${resTxt.idioma}) · ${kb} KB`
+                        );
+                        colorearVideoDom(
+                            item.videoId,
+                            'ok',
+                            `Descargado: ${resTxt.nombreArchivo} (${resTxt.idioma})`
+                        );
+
+                        pc.log.push(`[OK] ${rutaFinal} (${resTxt.idioma} · ${kb} KB)`);
+                    } catch (e) {
+                        if (e.esCancelacion || cancelado) break;
+
+                        if (e.noTieneSubtitulos) {
+                            sinSubtitulos++;
+                            const msgAzul = 'No existe posibilidad de sacar subtítulos porque el video no tiene ninguno habilitado.';
+                            pieza(pc, i, 'sin-subtitulos', item.nombre, `🔵 ${msgAzul}`);
+                            colorearVideoDom(item.videoId, 'sin-subtitulos', `🔵 ${msgAzul}`);
+                            pc.log.push(
+                                `[SIN SUBTÍTULOS - AZUL] ${subCarpeta}/${item.nombre} (https://youtu.be/${item.videoId}): ${msgAzul}`
+                            );
+                        } else {
+                            errores++;
+                            pieza(pc, i, 'error', item.nombre, e.message);
+                            colorearVideoDom(item.videoId, 'error', e.message);
+                            pc.log.push(
+                                `[ERROR] ${subCarpeta}/${item.nombre} (https://youtu.be/${item.videoId}): ${e.message}`
+                            );
+                        }
+                    } finally {
+                        activos.delete(idWorker);
+                        procesados++;
+                        actualizarProgreso();
+                    }
+
+                    if (CFG.PAUSA > 0) {
+                        await dormir(CFG.PAUSA);
+                    }
+                }
+            };
+
+            const numHilos = Math.min(CFG.CONCURRENCIA, cola.length);
+            const promesas = [];
+            for (let w = 0; w < numHilos; w++) {
+                promesas.push(trabajador(w));
+            }
+
+            await Promise.all(promesas);
+
+            verificarCancelacion();
+
+            archivosParaMapa.sort((a, b) => a.ruta.localeCompare(b.ruta, 'es', { numeric: true }));
+
+            empaquetarYDescargarZipFinal(
+                pc,
+                zip,
+                carpetaRaiz,
+                archivosParaMapa,
+                cabeceraLog,
+                ok,
+                errores,
+                sinSubtitulos,
+                cola.length,
+                false
+            );
+        } catch (e) {
+            if (e.esCancelacion || cancelado) {
+                pc.log.push('[CANCELADO] Descarga detenida por el usuario');
+                if (ok > 0) {
+                    archivosParaMapa.sort((a, b) => a.ruta.localeCompare(b.ruta, 'es', { numeric: true }));
+                    empaquetarYDescargarZipFinal(
+                        pc,
+                        zip,
+                        carpetaRaiz,
+                        archivosParaMapa,
+                        cabeceraLog,
+                        ok,
+                        errores,
+                        sinSubtitulos,
+                        ok + errores + sinSubtitulos,
+                        true
+                    );
+                } else {
+                    zip.limpiarMemoria();
+                    pc.estado.textContent = 'Descarga detenida sin archivos procesados.';
+                    pc.boton.textContent = 'Descargar .zip';
+                    pc.boton.classList.remove('detener', 'listo');
+                }
+            } else {
+                zip.limpiarMemoria();
+                pc.log.push(`[ERROR GENERAL] ${e.message}`);
+                pc.estado.textContent = `Error: ${e.message}`;
+                pc.boton.textContent = 'Descargar .zip';
+                pc.boton.classList.remove('detener');
+                console.error('[Canal de YouTube a TXT]', e);
+            }
+        } finally {
+            limpiarTodosLosIframesTrabajadores();
+            _subtitulosCachePorVideoId.clear();
+            _transcriptJsonPorVideoId.clear();
+            restaurarColoresVideosDom();
+            pc.copiar.hidden = false;
+            pc.boton.disabled = false;
+            pc.boton.classList.remove('detener');
+            pc.botonesModo.forEach(b => (b.disabled = false));
+            pc.inputUltimos.disabled = false;
+            cancelado = false;
+            ocupado = false;
+        }
+    }
+
+    function empaquetarYDescargarZipFinal(
+        pc,
+        zip,
+        carpetaRaiz,
+        archivosParaMapa,
+        cabeceraLog,
+        ok,
+        errores,
+        sinSubtitulos,
+        totalProcesados,
+        fueParcial
+    ) {
+        archivosParaMapa.push({
+            ruta: `${carpetaRaiz}/_REPORTE.txt`,
+            comentario: 'Mapa de estructura de archivos y registro de transcripciones'
+        });
+
+        const mapaAscii = generarMapaArbol(carpetaRaiz, archivosParaMapa);
+
+        pc.log = [
+            ...cabeceraLog,
+            'ESTRUCTURA DE ARCHIVOS DEL CANAL:',
+            mapaAscii,
+            '',
+            'DETALLE DE OPERACIONES:',
+            ...pc.log.slice(cabeceraLog.length),
+            '',
+            `Total TXT: ${ok} | Sin subtítulos (Azul - el video no tiene): ${sinSubtitulos} | Errores: ${errores}`
+        ];
+
+        zip.agregar(`${carpetaRaiz}/_REPORTE.txt`, pc.log.join('\r\n'));
+
+        const blob = zip.generarBlob();
+        pc.zipBlob = blob;
+        pc.zipNombre = fueParcial
+            ? `${carpetaRaiz} (Parcial ${ok} TXT).zip`
+            : `${carpetaRaiz}.zip`;
+        pc.ultimoModoDescargado = pc.modo;
+
+        guardarZip(pc);
+
+        const mb = (blob.size / 1048576).toFixed(2);
+        const duracionTotal = formatearTiempoRestante((Date.now() - (pc.tiempoInicio || Date.now())) / 1000);
+        pc.pct.textContent = fueParcial
+            ? `Detenido (${ok}/${totalProcesados})`
+            : `100% (${ok}/${totalProcesados})`;
+        pc.estado.textContent = `${fueParcial ? 'ZIP parcial guardado' : 'Canal descargado'} (${mb} MB en ${duracionTotal}) · ${ok} TXT · 🔵 ${sinSubtitulos} sin subtítulos · ${errores} errores`;
+        pc.boton.textContent = 'Guardar .zip';
+        pc.boton.classList.remove('detener');
+        pc.boton.classList.add('listo');
+        pc.boton.title =
+            'Clic: volver a guardar el ZIP al instante. Mayús + clic: volver a escanear el canal.';
+    }
+
+    // ==================================================
+    // EXPORTACIÓN DIRECTA PARA VIDEOS SUELTOS Y SHORTS
+    // ==================================================
 
     function obtenerInfoPaginaActual() {
         const path = window.location.pathname;
@@ -4759,50 +4338,54 @@
 
     async function descargarTranscripcionVideoActual(botonEl, info) {
         if (!info || !info.videoId) return;
-        const textoOriginal = obtenerTextoBoton(botonEl);
+        const textoOriginal = botonEl.textContent;
         botonEl.disabled = true;
         botonEl.classList.remove('copiado', 'sin-subtitulos');
-        cambiarTextoBoton(botonEl, '⏳ Extrayendo...');
+        botonEl.textContent = '⏳ Extrayendo...';
 
         try {
             let titulo = document.title.replace(/- YouTube$/i, '').trim() || info.videoId;
             try {
-                const snap = obtenerSnapshotPagina(info.videoId);
-                if (snap?.pr?.videoDetails?.title) {
-                    titulo = snap.pr.videoDetails.title;
+                const prDom = win.document?.getElementById('movie_player')?.getPlayerResponse?.();
+                if (prDom?.videoDetails?.title) {
+                    titulo = prDom.videoDetails.title;
                 }
-            } catch {
-                // Usar el título del documento si no existe playerResponse.
-            }
+            } catch {}
 
             const res = await procesarVideoATxt({ videoId: info.videoId, nombre: titulo });
 
             if (res && res.bytes) {
                 descargarBlob(res.bytes, res.nombreArchivo, 'text/plain;charset=utf-8');
                 const txt = new TextDecoder().decode(res.bytes);
-                await copiarAlPortapapeles(txt);
+                try {
+                    if (typeof GM_setClipboard === 'function') {
+                        GM_setClipboard(txt, 'text');
+                    } else if (navigator.clipboard) {
+                        await navigator.clipboard.writeText(txt);
+                    }
+                } catch {}
 
-                cambiarTextoBoton(botonEl, '¡Copiado y Descargado! ✓');
+                botonEl.textContent = '¡Copiado y Descargado! ✓';
                 botonEl.classList.add('copiado');
                 setTimeout(() => {
                     botonEl.disabled = false;
-                    cambiarTextoBoton(botonEl, textoOriginal);
+                    botonEl.textContent = textoOriginal;
                     botonEl.classList.remove('copiado');
                 }, 2500);
             }
         } catch (e) {
             if (e.noTieneSubtitulos) {
-                cambiarTextoBoton(botonEl, '🔵 El video no tiene subtítulos');
+                botonEl.textContent = '🔵 El video no tiene subtítulos';
                 botonEl.classList.add('sin-subtitulos');
                 console.info(
                     `[Canal de YouTube a TXT] [SIN SUBTÍTULOS - AZUL] https://youtu.be/${info.videoId}: No existe posibilidad de sacar subtítulos porque el video no tiene ninguno habilitado.`
                 );
             } else {
-                cambiarTextoBoton(botonEl, `❌ ${e.message || 'Error'}`);
+                botonEl.textContent = `❌ ${e.message || 'Error'}`;
             }
             setTimeout(() => {
                 botonEl.disabled = false;
-                cambiarTextoBoton(botonEl, textoOriginal);
+                botonEl.textContent = textoOriginal;
                 botonEl.classList.remove('sin-subtitulos');
             }, 3500);
         }
@@ -4813,7 +4396,7 @@
         if (!info.tipo || !info.videoId) return;
 
         if (!document.getElementById('maximus-yt-css')) {
-            inyectarCss();
+            css();
         }
 
         if (info.tipo === 'watch') {
@@ -4827,15 +4410,13 @@
                 return;
             }
 
-            const btn = crearBotonConLogo(
-                {
-                    className: 'maximus-btn-video',
-                    type: 'button',
-                    dataset: { videoId: info.videoId },
-                    title: 'Descarga la transcripción en formato TXT (bloques de 200, marcas de tiempo y título)'
-                },
-                'Transcripción TXT'
-            );
+            const btn = crearElemento('button', {
+                className: 'maximus-btn-video',
+                type: 'button',
+                dataset: { videoId: info.videoId },
+                title: 'Descarga la transcripción en formato TXT (bloques de 200, marcas de tiempo y título)',
+                textContent: '📝 Transcripción TXT'
+            });
             btn.addEventListener('click', () => {
                 const actualInfo = obtenerInfoPaginaActual();
                 descargarTranscripcionVideoActual(btn, actualInfo);
@@ -4850,14 +4431,12 @@
             if (!contenedorAcciones) return;
             if (reel.querySelector('.maximus-btn-video')) return;
 
-            const btn = crearBotonConLogo(
-                {
-                    className: 'maximus-btn-video',
-                    type: 'button',
-                    title: 'Descarga la transcripción del Short en TXT'
-                },
-                'TXT'
-            );
+            const btn = crearElemento('button', {
+                className: 'maximus-btn-video',
+                type: 'button',
+                title: 'Descarga la transcripción del Short en TXT',
+                textContent: '📝 TXT'
+            });
             btn.style.margin = '6px 0';
             btn.addEventListener('click', () => {
                 const actualInfo = obtenerInfoPaginaActual();
@@ -4867,11 +4446,15 @@
         }
     }
 
+    // ==================================================
+    // INICIALIZACIÓN
+    // ==================================================
+
     function agendar() {
-        if (estado.ocupado || estado.pendiente) return;
-        estado.pendiente = true;
+        if (ocupado || pendiente) return;
+        pendiente = true;
         setTimeout(() => {
-            estado.pendiente = false;
+            pendiente = false;
             if (enPantallaDeCanal()) {
                 montarPanelCanal();
             } else {
@@ -4881,55 +4464,16 @@
     }
 
     function iniciar() {
-        if (estado.esIframe && !estado.esIframeTrabajador) {
-            return;
-        }
-
-        instalarHooksPotUnaVez();
-        registrarReceptorMensajesVentana();
-
-        if (estado.esIframeTrabajador) {
-            ejecutarAgenteIframeTrabajador();
-            return;
-        }
-
-        // Limpia paneles e intervalos anteriores si la extensión recarga el bundle desde GitHub.
-        if (window.__maximusYtInterval) {
-            clearInterval(window.__maximusYtInterval);
-        }
-        if (window.__maximusYtCleanup) {
-            try {
-                window.__maximusYtCleanup();
-            } catch {
-                // Ignorar limpieza previa incompleta.
-            }
-        }
-
-        document.querySelectorAll('.maximus-panel, .maximus-btn-video').forEach(el => el.remove());
-        estado.panelCanal = null;
-
-        if (document.documentElement) {
-            document.documentElement.dataset.maximusYtIniciado = '1';
-        }
-
-        inyectarCss();
+        css();
         agendar();
 
-        const eventosNav = ['yt-navigate-finish', 'yt-page-data-updated', 'popstate'];
-        for (const ev of eventosNav) {
+        for (const ev of ['yt-navigate-finish', 'yt-page-data-updated', 'popstate']) {
             window.addEventListener?.(ev, agendar, { passive: true });
             document.addEventListener?.(ev, agendar, { passive: true });
         }
 
-        window.__maximusYtCleanup = () => {
-            for (const ev of eventosNav) {
-                window.removeEventListener?.(ev, agendar, { passive: true });
-                document.removeEventListener?.(ev, agendar, { passive: true });
-            }
-        };
-
-        window.__maximusYtInterval = setInterval(() => {
-            if (!estado.ocupado) {
+        setInterval(() => {
+            if (!ocupado) {
                 if (enPantallaDeCanal()) {
                     montarPanelCanal();
                 } else {
@@ -4939,17 +4483,9 @@
         }, 1500);
     }
 
-    if (!estado.esIframe || estado.esIframeTrabajador) {
-        if (document.documentElement) {
-            document.documentElement.dataset.maximusYtIniciado = '1';
-        }
-        instalarHooksPotUnaVez();
-        registrarReceptorMensajesVentana();
-
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', iniciar, { once: true });
-        } else {
-            iniciar();
-        }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', iniciar, { once: true });
+    } else {
+        iniciar();
     }
 })();

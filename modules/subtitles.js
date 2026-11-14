@@ -1,6 +1,9 @@
-// Codificación Protobuf para get_transcript, parseo XML/JSON3/VTT y armado de bloques de 200 caracteres.
+import { CFG, _potParamsByVideoId, _subtitulosCachePorVideoId } from './config.js';
+import { _potLatestParams } from './interceptor.js';
 
-import { CFG, estado } from './config.js';
+// ==================================================
+// CODIFICADOR PROTOBUF PARA /youtubei/v1/get_transcript
+// ==================================================
 
 export function encodeVarint(num) {
     const bytes = [];
@@ -43,8 +46,7 @@ export function generarParamsProtobufGetTranscript(videoId, languageCode = 'es',
             const outerA = [
                 ...encodeProtobufString(1, videoId),
                 ...encodeProtobufString(2, innerB64Url),
-                0x18,
-                0x01
+                0x18, 0x01
             ];
             candidatos.push(bytesToBase64(outerA));
 
@@ -52,20 +54,26 @@ export function generarParamsProtobufGetTranscript(videoId, languageCode = 'es',
             const outerB = [
                 ...encodeProtobufString(1, videoId),
                 ...encodeProtobufString(2, innerB64Raw),
-                0x18,
-                0x01
+                0x18, 0x01
             ];
             candidatos.push(bytesToBase64(outerB));
         }
     }
 
-    const outerDefault = [...encodeProtobufString(1, videoId), 0x18, 0x01];
+    const outerDefault = [
+        ...encodeProtobufString(1, videoId),
+        0x18, 0x01
+    ];
     candidatos.push(bytesToBase64(outerDefault));
 
     return Array.from(new Set(candidatos));
 }
 
-const ENTIDADES_HTML = Object.freeze({
+// ==================================================
+// NÚCLEO DE FORMATEO DE SUBTÍTULOS (BLOQUES DE 200 CARACTERES)
+// ==================================================
+
+export const ENTIDADES_HTML = Object.freeze({
     amp: '&',
     lt: '<',
     gt: '>',
@@ -74,7 +82,6 @@ const ENTIDADES_HTML = Object.freeze({
     nbsp: ' '
 });
 
-// Dos pasadas porque YouTube suele entregar entidades doblemente escapadas en XML timedtext (&amp;#39;).
 export function decodeHtmlEntities(raw) {
     let str = String(raw ?? '');
     for (let pase = 0; pase < 2; pase++) {
@@ -107,7 +114,7 @@ export function formatTime(time) {
     return `${String(minutes)}:${String(seconds).padStart(2, '0')}`;
 }
 
-const pad2 = value => String(value).padStart(2, '0');
+export const pad2 = value => String(value).padStart(2, '0');
 
 export const formatTxtTime = seconds =>
     `${Math.floor(seconds / 60)}:${pad2(Math.floor(seconds % 60))}`;
@@ -122,15 +129,6 @@ export function toSubtitles(cues) {
             startInFormat: formatTime(start)
         };
     });
-}
-
-export function parseClockTimeToSeconds(val) {
-    const s = String(val || '').trim();
-    if (!s) return 0;
-    const parts = s.split(':').map(Number);
-    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-    if (parts.length === 2) return parts[0] * 60 + parts[1];
-    return Number(s) || 0;
 }
 
 export function parseYouTubeSubtitles(xml) {
@@ -163,12 +161,8 @@ export function parseYouTubeSubtitles(xml) {
             const mDur = attrs.match(/\bdur\s*=\s*["']([^"']+)["']/i);
             const limpio = rawBody.replace(/<[^>]+>/g, '').trim();
             if (limpio) {
-                const startVal = mT
-                    ? (parseFloat(mT[1]) || 0) / 1000
-                    : parseFloat(mStart ? mStart[1] : '0') || 0;
-                const durVal = mD
-                    ? (parseFloat(mD[1]) || 0) / 1000
-                    : parseFloat(mDur ? mDur[1] : '0') || 0;
+                const startVal = mT ? (parseFloat(mT[1]) || 0) / 1000 : (parseFloat(mStart ? mStart[1] : '0') || 0);
+                const durVal = mD ? (parseFloat(mD[1]) || 0) / 1000 : (parseFloat(mDur ? mDur[1] : '0') || 0);
                 cues.push({
                     text: limpio,
                     start: startVal,
@@ -196,31 +190,29 @@ export function parseJson3Subtitles(jsonStr) {
 
 export function parseSubtitleVTT(vttText) {
     const cues = [];
-    String(vttText || '')
-        .replace(/\r/g, '')
-        .split(/\n\n+/)
-        .forEach(block => {
-            const lines = block
-                .split('\n')
-                .map(l => l.trim())
-                .filter(Boolean);
-            if (!lines.length || lines[0] === 'WEBVTT') return;
-            const timeIndex = lines.findIndex(l => l.includes('-->'));
-            if (timeIndex < 0) return;
-            const parts = lines[timeIndex].split('-->');
-            if (parts.length < 2) return;
-            const start = parseClockTimeToSeconds(parts[0].trim());
-            const end = parseClockTimeToSeconds(parts[1].trim().split(/\s+/)[0]);
-            const dur = Math.max(0, end - start);
-            const text = lines
-                .slice(timeIndex + 1)
-                .join(' ')
-                .replace(/<[^>]*>/g, '')
-                .replace(/\s+/g, ' ')
-                .trim();
-            if (text) cues.push({ start, dur, text });
-        });
+    String(vttText || '').replace(/\r/g, '').split(/\n\n+/).forEach(block => {
+        const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
+        if (!lines.length || lines[0] === 'WEBVTT') return;
+        const timeIndex = lines.findIndex(l => l.includes('-->'));
+        if (timeIndex < 0) return;
+        const parts = lines[timeIndex].split('-->');
+        if (parts.length < 2) return;
+        const start = parseClockTimeToSeconds(parts[0].trim());
+        const end = parseClockTimeToSeconds(parts[1].trim().split(/\s+/)[0]);
+        const dur = Math.max(0, end - start);
+        const text = lines.slice(timeIndex + 1).join(' ').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+        if (text) cues.push({ start, dur, text });
+    });
     return toSubtitles(cues);
+}
+
+export function parseClockTimeToSeconds(val) {
+    const s = String(val || '').trim();
+    if (!s) return 0;
+    const parts = s.split(':').map(Number);
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    return Number(s) || 0;
 }
 
 export function decodeSubtitles(subtitles) {
@@ -248,9 +240,7 @@ export function construirBloquesSubtitulos(originals, blockSize = CFG.BLOCK_SIZE
     let length = 0;
 
     originals.forEach((sub, index) => {
-        const raw = String(sub.text ?? '')
-            .replace(/\s+/g, ' ')
-            .trim();
+        const raw = String(sub.text ?? '').replace(/\s+/g, ' ').trim();
         if (!raw) return;
 
         const textSegment = {
@@ -298,10 +288,16 @@ export function construirArchivoTxt(originals, { title, videoId }) {
     const units = construirBloquesSubtitulos(originals, CFG.BLOCK_SIZE);
     const url = videoId ? `https://youtu.be/${videoId}` : '';
 
-    const head = CFG.EXPORT_HEADER ? [title, url].filter(Boolean).join('\n') + '\n\n' : '';
+    const head = CFG.EXPORT_HEADER
+        ? [title, url].filter(Boolean).join('\n') + '\n\n'
+        : '';
 
     const cuerpo = units
-        .map(unit => (CFG.EXPORT_TIME ? `${formatTxtTime(unit.start)}\n` : '') + unit.text)
+        .map(
+            unit =>
+                (CFG.EXPORT_TIME ? `${formatTxtTime(unit.start)}\n` : '') +
+                unit.text
+        )
         .join('\n\n');
 
     return head + cuerpo;
@@ -332,12 +328,12 @@ export function agregarParametroSinRomperFirma(urlFirmada, clave, valor) {
     return `${urlFirmada}${sep}${clave}=${encodeURIComponent(valor)}`;
 }
 
-export function generarCandidatosSubtitulos(baseUrl, videoId, _codigoIdioma = 'es', _esAuto = false, necesitaTraducir = false) {
+export function generarCandidatosSubtitulos(baseUrl, videoId, codigoIdioma = 'es', esAuto = false, necesitaTraducir = false) {
     const candidatos = [];
 
     if (baseUrl) {
         const urlLimpia = baseUrl.replace(/\\u0026/g, '&');
-        const potParams = (videoId ? estado.potParamsByVideoId.get(videoId) : null) || estado.potLatestParams;
+        const potParams = (videoId ? _potParamsByVideoId.get(videoId) : null) || _potLatestParams;
 
         const aplicarPot = urlBase => {
             if (!potParams || Object.keys(potParams).length === 0) return null;
@@ -400,9 +396,7 @@ export function parsearPayloadSubtitulo(textoRaw) {
             const cues = parseYouTubeSubtitles(limpio);
             if (cues && cues.length > 0) return cues;
         }
-    } catch {
-        // Formato no reconocido o respuesta incompleta.
-    }
+    } catch {}
 
     return null;
 }

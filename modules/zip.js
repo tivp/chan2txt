@@ -1,5 +1,3 @@
-// Empaquetado ZIP sin compresión (STORE + CRC32) y mapa ASCII de archivos.
-
 import { canon, clonarBytes } from './utils.js';
 
 export function generarMapaArbol(raizNombre, listaArchivos) {
@@ -65,7 +63,7 @@ export function generarMapaArbol(raizNombre, listaArchivos) {
     return lineas.join('\r\n');
 }
 
-const CRC_TABLA = (() => {
+export const CRC_TABLA = (() => {
     const tabla = new Uint32Array(256);
     for (let i = 0; i < 256; i++) {
         let c = i;
@@ -200,7 +198,7 @@ export function crearZipNativo() {
 
 export function rutaLibre(zip, baseRuta, nombreArchivo) {
     const construir = n => (baseRuta ? `${baseRuta}/${n}` : n);
-    const candidato = construir(nombreArchivo);
+    let candidato = construir(nombreArchivo);
 
     if (!zip.tiene(candidato)) return candidato;
 

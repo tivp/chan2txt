@@ -1,7 +1,3 @@
-// Funciones de texto, DOM, tiempos ETA, parseo JSON y comunicación con el mundo MAIN.
-
-import { estado } from './config.js';
-
 export const dormir = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 export function crearElemento(tag, props = {}, hijos = []) {
@@ -32,6 +28,10 @@ export function crearElemento(tag, props = {}, hijos = []) {
     }
     return nodo;
 }
+
+// ==================================================
+// UTILIDADES DE TEXTO, DESCARGA DE BLOBS Y NOMBRES DE ARCHIVO
+// ==================================================
 
 export const texto = value =>
     String(value ?? '')
@@ -74,29 +74,6 @@ export function descargarBlob(bytes, nombreArchivo, mimeType = 'text/plain;chars
         a.remove();
         URL.revokeObjectURL(url);
     }, 10000);
-}
-
-export async function copiarAlPortapapeles(contenido) {
-    if (typeof GM_setClipboard === 'function') {
-        GM_setClipboard(contenido, 'text');
-        return;
-    }
-    try {
-        if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(contenido);
-            return;
-        }
-    } catch {
-        // Fallback clásico si el documento no tiene foco o falta permiso del portapapeles.
-    }
-    const area = document.createElement('textarea');
-    area.value = contenido;
-    area.style.position = 'fixed';
-    area.style.opacity = '0';
-    document.body.appendChild(area);
-    area.select();
-    document.execCommand('copy');
-    area.remove();
 }
 
 export function formatearTiempoRestante(segundosTotales) {
@@ -148,9 +125,8 @@ export function extraerJsonBalanceadoDesdeIndice(str, idxInicioLlave) {
             continue;
         }
         if (!enString) {
-            if (ch === '{') {
-                nivel++;
-            } else if (ch === '}') {
+            if (ch === '{') nivel++;
+            else if (ch === '}') {
                 nivel--;
                 if (nivel === 0) {
                     try {
@@ -177,93 +153,4 @@ export function extraerYtInitialDataDeHtml(html) {
         extraerJsonBalanceado(html, 'window["ytInitialData"] =') ||
         extraerJsonBalanceado(html, 'ytInitialData =')
     );
-}
-
-// Consulta al mundo MAIN mediante eventos síncronos del DOM cuando el script corre aislado (extensión MV3).
-export function solicitarEstadoPaginaMain(accion, extra = {}) {
-    if (typeof window === 'undefined' || !document.documentElement) return null;
-    const reqId = `c2t_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    let respuesta = null;
-
-    const onRes = ev => {
-        try {
-            respuesta = ev.detail ? JSON.parse(ev.detail) : null;
-        } catch {
-            respuesta = null;
-        }
-    };
-
-    window.addEventListener(`chan2txt-res-${reqId}`, onRes, { once: true });
-    window.dispatchEvent(
-        new CustomEvent('chan2txt-req', {
-            detail: JSON.stringify({ reqId, accion, ...extra })
-        })
-    );
-    window.removeEventListener(`chan2txt-res-${reqId}`, onRes);
-    return respuesta;
-}
-
-// Lee ytInitialData, ytcfg y #movie_player; compatible con Tampermonkey y MV3.
-export function obtenerSnapshotPagina(videoId = '') {
-    const { win } = estado;
-
-    if (win?.ytcfg || win?.ytInitialData || win?.ytInitialPlayerResponse) {
-        const player = win.document?.getElementById('movie_player');
-        const pr = player?.getPlayerResponse?.() || win.ytInitialPlayerResponse || null;
-        const initData = win.ytInitialData || null;
-        return {
-            ytcfg: {
-                apiKey: win.ytcfg?.get?.('INNERTUBE_API_KEY') ?? win.ytcfg?.data_?.INNERTUBE_API_KEY ?? '',
-                clientVersion:
-                    win.ytcfg?.get?.('INNERTUBE_CLIENT_VERSION') ??
-                    win.ytcfg?.data_?.INNERTUBE_CLIENT_VERSION ??
-                    win.ytcfg?.get?.('INNERTUBE_CONTEXT')?.client?.clientVersion ??
-                    '2.20260401.01.00',
-                clientName:
-                    win.ytcfg?.get?.('INNERTUBE_CONTEXT_CLIENT_NAME') ??
-                    win.ytcfg?.data_?.INNERTUBE_CONTEXT_CLIENT_NAME ??
-                    1,
-                visitorData:
-                    win.ytcfg?.get?.('VISITOR_DATA') ??
-                    win.ytcfg?.data_?.VISITOR_DATA ??
-                    win.ytcfg?.get?.('INNERTUBE_CONTEXT')?.client?.visitorData ??
-                    '',
-                sessionIndex: String(
-                    win.ytcfg?.get?.('SESSION_INDEX') ?? win.ytcfg?.data_?.SESSION_INDEX ?? '0'
-                ),
-                delegatedSessionId:
-                    win.ytcfg?.get?.('DELEGATED_SESSION_ID') ??
-                    win.ytcfg?.data_?.DELEGATED_SESSION_ID ??
-                    '',
-                sts: win.ytcfg?.get?.('STS') ?? win.ytcfg?.data_?.STS ?? null,
-                channelId: win.ytcfg?.get?.('CHANNEL_ID') ?? win.ytcfg?.data_?.CHANNEL_ID ?? '',
-                fullContext: win.ytcfg?.get?.('INNERTUBE_CONTEXT') ?? win.ytcfg?.data_?.INNERTUBE_CONTEXT ?? null
-            },
-            pr,
-            initData
-        };
-    }
-
-    return solicitarEstadoPaginaMain('GET_SNAPSHOT', { videoId });
-}
-
-export function activarSubtitulosMoviePlayer(silenciar = false) {
-    const playerDirecto = estado.win?.document?.getElementById('movie_player');
-    if (playerDirecto && typeof playerDirecto.getPlayerResponse === 'function') {
-        try {
-            if (silenciar) playerDirecto.mute?.();
-            playerDirecto.loadModule?.('captions');
-            playerDirecto.loadModule?.('cc');
-            const tracklist = playerDirecto.getOption?.('captions', 'tracklist') || [];
-            const trackEsp = tracklist.find(t => /^es/i.test(t.languageCode)) || tracklist[0];
-            if (trackEsp) {
-                playerDirecto.setOption?.('captions', 'track', trackEsp);
-            }
-            return { tracklist };
-        } catch {
-            return { tracklist: [] };
-        }
-    }
-
-    return solicitarEstadoPaginaMain('ACTIVATE_CAPTIONS', { silenciar }) || { tracklist: [] };
 }

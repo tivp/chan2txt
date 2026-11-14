@@ -21,22 +21,23 @@ const ORDEN_MODULOS = [
 ];
 
 const controladoresActivos = new Map();
-const urlsNotificaciones = new Map();
+const infoNotificaciones = new Map();
 
 function tieneSoporteUserScripts() {
     return typeof chrome.userScripts !== 'undefined' && typeof chrome.userScripts.register === 'function';
 }
 
-// Empaqueta los 11 módulos ES6 en una sola IIFE para registrarla con chrome.userScripts.
+// Empaqueta los 11 módulos ES6 en una sola IIFE para ejecutarla directamente en el mundo MAIN.
 function compilarBundleDesdeModulos(mapaModulos) {
     const bloques = ORDEN_MODULOS.map(nombre => {
         let codigo = String(mapaModulos[nombre] || '');
         codigo = codigo.replace(/^import\s+[\s\S]*?\bfrom\s+['"][^'"]+['"];?[ \t]*(?:\r?\n|$)/gm, '');
+        codigo = codigo.replace(/^import\s+['"][^'"]+['"];?[ \t]*(?:\r?\n|$)/gm, '');
         codigo = codigo.replace(/^export\s+(async\s+function|function|const|let)/gm, '$1');
         return `// --- ${nombre} ---\n${codigo.trim()}`;
     });
 
-    return `(() => {\n'use strict';\n\n${bloques.join('\n\n')}\n})();\n`;
+    return `(() => {\n'use strict';\nif (window.__chan2txtEjecutado) return;\nwindow.__chan2txtEjecutado = true;\n\n${bloques.join('\n\n')}\n})();\n`;
 }
 
 async function sincronizarUserScriptRegistrado(codigoCompilado) {
@@ -45,32 +46,44 @@ async function sincronizarUserScriptRegistrado(codigoCompilado) {
     }
 
     try {
-        if (typeof chrome.userScripts.configureWorld === 'function') {
-            try {
-                await chrome.userScripts.configureWorld({ messaging: true });
-            } catch {
-                // Si no permite configurar messaging en el mundo aislado, se usa el puente DOM de content.js.
-            }
-        }
-
         try {
             await chrome.userScripts.unregister({ ids: [USER_SCRIPT_ID] });
         } catch {
             // No había versión previa registrada.
         }
 
-        await chrome.userScripts.register([
-            {
-                id: USER_SCRIPT_ID,
-                matches: MATCHES_YOUTUBE,
-                allFrames: true,
-                js: [{ code: codigoCompilado }],
-                runAt: 'document_start',
-                world: 'USER_SCRIPT'
+        try {
+            await chrome.userScripts.register([
+                {
+                    id: USER_SCRIPT_ID,
+                    matches: MATCHES_YOUTUBE,
+                    allFrames: true,
+                    js: [{ code: codigoCompilado }],
+                    runAt: 'document_start',
+                    world: 'MAIN'
+                }
+            ]);
+            return true;
+        } catch {
+            if (typeof chrome.userScripts.configureWorld === 'function') {
+                try {
+                    await chrome.userScripts.configureWorld({ messaging: true });
+                } catch {
+                    // El puente DOM de content.js sigue disponible como respaldo.
+                }
             }
-        ]);
-
-        return true;
+            await chrome.userScripts.register([
+                {
+                    id: USER_SCRIPT_ID,
+                    matches: MATCHES_YOUTUBE,
+                    allFrames: true,
+                    js: [{ code: codigoCompilado }],
+                    runAt: 'document_start',
+                    world: 'USER_SCRIPT'
+                }
+            ]);
+            return true;
+        }
     } catch {
         return false;
     }
@@ -98,38 +111,55 @@ async function asegurarUserScriptDesdeCache() {
     return { activo: ok, registradoAhora: ok, cache };
 }
 
-async function ejecutarCodigoEnPestana(tabId, codigoCompilado) {
-    if (!tabId || !codigoCompilado) return false;
-
-    if (tieneSoporteUserScripts() && typeof chrome.userScripts.execute === 'function') {
-        try {
-            await chrome.userScripts.execute({
-                target: { tabId },
-                js: [{ code: codigoCompilado }],
-                world: 'USER_SCRIPT'
-            });
-            return true;
-        } catch {
-            // Probar respaldo en mundo MAIN si la pestaña lo permite.
-        }
-    }
+async function inyectarScriptLocalEnMain(tabId, frameId) {
+    if (!tabId) return false;
+    const frameIds = typeof frameId === 'number' ? [frameId] : undefined;
+    const target = frameIds ? { tabId, frameIds } : { tabId };
 
     try {
-        await chrome.scripting.executeScript({
-            target: { tabId },
+        const [chk] = await chrome.scripting.executeScript({
+            target,
             world: 'MAIN',
-            args: [codigoCompilado],
-            func: codigo => {
-                const s = document.createElement('script');
-                s.textContent = codigo;
-                (document.head || document.documentElement).appendChild(s);
-                s.remove();
+            func: () => {
+                if (window.__chan2txtEjecutado) return true;
+                window.__chan2txtEjecutado = true;
+                return false;
             }
+        });
+        if (chk?.result) {
+            return true;
+        }
+        await chrome.scripting.executeScript({
+            target,
+            world: 'MAIN',
+            files: ['script.js'],
+            injectImmediately: true
         });
         return true;
     } catch {
         return false;
     }
+}
+
+async function ejecutarCodigoEnPestana(tabId, codigoCompilado) {
+    if (!tabId || !codigoCompilado) return false;
+
+    if (tieneSoporteUserScripts() && typeof chrome.userScripts.execute === 'function') {
+        for (const world of ['MAIN', 'USER_SCRIPT']) {
+            try {
+                await chrome.userScripts.execute({
+                    target: { tabId },
+                    js: [{ code: codigoCompilado }],
+                    world
+                });
+                return true;
+            } catch {
+                // Probar siguiente mundo o respaldo local.
+            }
+        }
+    }
+
+    return inyectarScriptLocalEnMain(tabId);
 }
 
 async function actualizarScriptsDesdeGithub() {
@@ -213,10 +243,23 @@ chrome.runtime.onInstalled.addListener(() => {
 
 if (chrome.notifications?.onClicked) {
     chrome.notifications.onClicked.addListener(notifId => {
-        const url = urlsNotificaciones.get(notifId);
-        urlsNotificaciones.delete(notifId);
-        if (url) {
-            chrome.tabs.create({ url }).catch(() => {});
+        const info = infoNotificaciones.get(notifId);
+        infoNotificaciones.delete(notifId);
+        if (!info) return;
+
+        if (info.tabId) {
+            chrome.tabs.update(info.tabId, { active: true }).catch(() => {});
+            if (info.clientNotifId) {
+                chrome.tabs
+                    .sendMessage(info.tabId, {
+                        action: 'MAXIMUS_NOTIFY_CLICKED',
+                        notifId: info.clientNotifId
+                    })
+                    .catch(() => {});
+            }
+        }
+        if (info.url) {
+            chrome.tabs.create({ url: info.url }).catch(() => {});
         }
     });
 }
@@ -241,9 +284,11 @@ chrome.runtime.onMessage.addListener((mensaje, sender, enviarRespuesta) => {
     if (mensaje.action === 'MAXIMUS_NOTIFY') {
         try {
             const notifId = `c2t_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-            if (mensaje.url) {
-                urlsNotificaciones.set(notifId, mensaje.url);
-            }
+            infoNotificaciones.set(notifId, {
+                tabId: sender.tab?.id,
+                url: mensaje.url || '',
+                clientNotifId: mensaje.notifId || ''
+            });
             chrome.notifications?.create(notifId, {
                 type: 'basic',
                 iconUrl: 'Transfomer Logo.png',
@@ -340,13 +385,22 @@ chrome.runtime.onMessage.addListener((mensaje, sender, enviarRespuesta) => {
     if (mensaje.action === 'MAXIMUS_INIT_TAB') {
         asegurarUserScriptDesdeCache()
             .then(async info => {
-                if (info.activo && info.registradoAhora && sender.tab?.id && info.cache?.codigoCompilado) {
-                    await ejecutarCodigoEnPestana(sender.tab.id, info.cache.codigoCompilado);
+                if (info.activo) {
+                    if (info.registradoAhora && sender.tab?.id && info.cache?.codigoCompilado) {
+                        await ejecutarCodigoEnPestana(sender.tab.id, info.cache.codigoCompilado);
+                    }
+                    enviarRespuesta({ inyectadoRemoto: true });
+                    return;
                 }
-                enviarRespuesta({ inyectadoRemoto: info.activo });
+
+                let inyectadoLocalMain = false;
+                if (sender.tab?.id) {
+                    inyectadoLocalMain = await inyectarScriptLocalEnMain(sender.tab.id, sender.frameId);
+                }
+                enviarRespuesta({ inyectadoRemoto: false, inyectadoLocalMain });
             })
             .catch(() => {
-                enviarRespuesta({ inyectadoRemoto: false });
+                enviarRespuesta({ inyectadoRemoto: false, inyectadoLocalMain: false });
             });
         return true;
     }

@@ -1,68 +1,39 @@
-// Pipeline de extracción en 5 capas por video (DOM vivo, /watch + /next, get_transcript, clientes móviles e iframe /watch).
-
-import { CFG, CLIENTES_INNERTUBE, estado, verificarCancelacion } from './config.js';
 import {
-    activarSubtitulosMoviePlayer,
+    win,
+    CFG,
+    CLIENTES_INNERTUBE,
+    _subtitulosCachePorVideoId,
+    _transcriptJsonPorVideoId
+} from './config.js';
+import {
     dormir,
-    extraerJsonBalanceadoDesdeIndice,
-    obtenerSnapshotPagina,
+    texto,
     seguro,
-    texto
+    extraerJsonBalanceadoDesdeIndice
 } from './utils.js';
+import { extraerMedianteIframeWatchReal } from './worker-iframe.js';
 import {
     calcularSapisidHash,
     construirHeadersInnerTube,
-    fetchTexto,
     obtenerConfigYtcfg,
-    peticionHttpBaja
+    peticionHttpBaja,
+    fetchTexto
 } from './http.js';
 import {
-    construirArchivoTxt,
-    construirBloquesSubtitulos,
-    convertirDomCuesASubtitulos,
-    decodeSubtitles,
-    elegirPistaSubtitulo,
-    generarCandidatosSubtitulos,
     generarParamsProtobufGetTranscript,
+    decodeSubtitles,
+    construirBloquesSubtitulos,
+    construirArchivoTxt,
+    elegirPistaSubtitulo,
     parsearPayloadSubtitulo,
-    parsearRespuestaGetTranscript
+    parsearRespuestaGetTranscript,
+    convertirDomCuesASubtitulos
 } from './subtitles.js';
-import { extraerMedianteIframeWatchReal } from './worker-iframe.js';
-
-export function extraerFechaPublicacion(playerResponse, html = '') {
-    const mf = playerResponse?.microformat?.playerMicroformatRenderer;
-    const rawFecha =
-        mf?.publishDate ||
-        mf?.uploadDate ||
-        (html
-            ? html.match(/"publishDate"\s*:\s*"(\d{4}-\d{2}-\d{2})/)?.[1] ||
-              html.match(/"uploadDate"\s*:\s*"(\d{4}-\d{2}-\d{2})/)?.[1] ||
-              html.match(/itemprop="datePublished"\s+content="(\d{4}-\d{2}-\d{2})/)?.[1]
-            : '') ||
-        '';
-
-    const m = String(rawFecha).match(/^(\d{4}-\d{2}-\d{2})/);
-    return m ? m[1] : '0000-00-00';
-}
-
-export function extraerPistasDePlayerResponse(pr) {
-    return (
-        pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks ||
-        pr?.captions?.playerCaptionsRenderer?.captionTracks ||
-        []
-    );
-}
+import { cancelado, verificarCancelacion } from './main.js';
 
 export function extraerDatosLigerosDeHtmlWatch(html) {
     if (!html || typeof html !== 'string') {
-        return {
-            titulo: '',
-            fecha: '0000-00-00',
-            pistas: [],
-            transcriptParams: [],
-            playabilityStatus: 'OK',
-            visitorData: ''
-        };
+        return { titulo: '', fecha: '0000-00-00', pistas: [], transcriptParams: [], playabilityStatus: 'OK', visitorData: '' };
     }
 
     const transcriptParams = [];
@@ -73,9 +44,7 @@ export function extraerDatosLigerosDeHtmlWatch(html) {
     }
 
     let visitorData = '';
-    const mVis =
-        html.match(/"VISITOR_DATA"\s*:\s*"([^"]+)"/) ||
-        html.match(/"visitorData"\s*:\s*"([^"]+)"/);
+    const mVis = html.match(/"VISITOR_DATA"\s*:\s*"([^"]+)"/) || html.match(/"visitorData"\s*:\s*"([^"]+)"/);
     if (mVis?.[1]) visitorData = mVis[1];
 
     let fecha = '0000-00-00';
@@ -91,10 +60,7 @@ export function extraerDatosLigerosDeHtmlWatch(html) {
 
     const idxCaptions = html.indexOf('"playerCaptionsTracklistRenderer":');
     if (idxCaptions !== -1) {
-        const objCap = extraerJsonBalanceadoDesdeIndice(
-            html,
-            idxCaptions + '"playerCaptionsTracklistRenderer":'.length
-        );
+        const objCap = extraerJsonBalanceadoDesdeIndice(html, idxCaptions + '"playerCaptionsTracklistRenderer":'.length);
         if (Array.isArray(objCap?.captionTracks)) {
             pistas = objCap.captionTracks;
         }
@@ -126,6 +92,7 @@ export function extraerDatosLigerosDeHtmlWatch(html) {
     };
 }
 
+// Consulta /youtubei/v1/next para obtener el getTranscriptEndpoint firmado oficial de un video sin cargar el DOM
 export async function obtenerDatosViaInnertubeNext(videoId) {
     verificarCancelacion();
     const { headers, cfg } = await construirHeadersInnerTube(true);
@@ -162,11 +129,12 @@ export async function obtenerDatosViaInnertubeNext(videoId) {
             return Array.from(new Set(params));
         }
     } catch (e) {
-        if (e.esCancelacion || estado.cancelado) throw e;
+        if (e.esCancelacion || cancelado) throw e;
     }
     return [];
 }
 
+// Consulta /youtubei/v1/player con clientes ANDROID / IOS / MWEB / WEB_EMBEDDED (que entregan URLs de subtítulos sin exigencia de PO Token de navegador)
 export async function obtenerPlayerMultiCliente(videoId, visitorDataOverride = '') {
     verificarCancelacion();
     const cfg = obtenerConfigYtcfg();
@@ -189,28 +157,26 @@ export async function obtenerPlayerMultiCliente(videoId, visitorDataOverride = '
                 videoId,
                 contentCheckOk: true,
                 racyCheckOk: true,
-                ...(cfg.sts
-                    ? { playbackContext: { contentPlaybackContext: { signatureTimestamp: Number(cfg.sts) } } }
-                    : {})
+                ...(cfg.sts ? { playbackContext: { contentPlaybackContext: { signatureTimestamp: Number(cfg.sts) } } } : {})
             };
 
             const headersCli = {
                 'Content-Type': 'application/json',
                 'X-Youtube-Client-Name': cli.id,
                 'X-Youtube-Client-Version': cli.context.clientVersion,
-                Origin: 'https://www.youtube.com',
+                'Origin': 'https://www.youtube.com',
                 'X-Origin': 'https://www.youtube.com',
                 ...(vData ? { 'X-Goog-Visitor-Id': vData } : {}),
                 ...(cli.ua ? { 'User-Agent': cli.ua } : {})
             };
 
-            // Android e iOS suelen responder sin requerir cookies de sesión web.
+            // Intento 1: anónimo (Android/iOS funcionan de maravilla sin cookies de navegador web)
             for (const modoAnonimo of [true, false]) {
                 verificarCancelacion();
                 const hFinal = { ...headersCli };
                 if (!modoAnonimo) {
                     const auth = await calcularSapisidHash('https://www.youtube.com');
-                    if (auth) hFinal.Authorization = auth;
+                    if (auth) hFinal['Authorization'] = auth;
                 }
                 const resp = await peticionHttpBaja(urlPlayer, {
                     method: 'POST',
@@ -236,7 +202,7 @@ export async function obtenerPlayerMultiCliente(videoId, visitorDataOverride = '
                 }
             }
         } catch (e) {
-            if (e.esCancelacion || estado.cancelado) throw e;
+            if (e.esCancelacion || cancelado) throw e;
         }
     }
     return null;
@@ -287,7 +253,7 @@ export async function extraerSubtitulosViaGetTranscript(videoId, pistaElegida = 
                 }
             }
         } catch (e) {
-            if (e.esCancelacion || estado.cancelado) throw e;
+            if (e.esCancelacion || cancelado) throw e;
         }
     }
 
@@ -299,8 +265,8 @@ export async function obtenerSubtitulosRobusto(pistaElegida, videoId, idiomaPref
     const esAuto = pistaElegida?.kind === 'asr';
     const necesitaTraducir = !!pistaElegida?.necesitaTraducir;
 
-    if (estado.subtitulosCachePorVideoId.has(videoId)) {
-        const cuesCache = parsearPayloadSubtitulo(estado.subtitulosCachePorVideoId.get(videoId));
+    if (_subtitulosCachePorVideoId.has(videoId)) {
+        const cuesCache = parsearPayloadSubtitulo(_subtitulosCachePorVideoId.get(videoId));
         if (cuesCache && cuesCache.length > 0) {
             return decodeSubtitles(cuesCache).filter(s => s.text.length > 0);
         }
@@ -317,6 +283,7 @@ export async function obtenerSubtitulosRobusto(pistaElegida, videoId, idiomaPref
     for (const candUrl of candidatos) {
         verificarCancelacion();
 
+        // Intento A: vía peticionHttpBaja (GM_xmlhttpRequest / fetch)
         for (const preferirFetch of [true, false]) {
             try {
                 const res = await peticionHttpBaja(candUrl, {
@@ -331,7 +298,7 @@ export async function obtenerSubtitulosRobusto(pistaElegida, videoId, idiomaPref
                     }
                 }
             } catch (e) {
-                if (e.esCancelacion || estado.cancelado) throw e;
+                if (e.esCancelacion || cancelado) throw e;
             }
         }
     }
@@ -339,22 +306,34 @@ export async function obtenerSubtitulosRobusto(pistaElegida, videoId, idiomaPref
     return [];
 }
 
+// Extracción infalible cuando el usuario está dentro de /watch?v=ID
 export async function activarSubtitulosEnPlayerActivoDom(videoId) {
     try {
         if (!location.pathname.includes('/watch') || new URLSearchParams(location.search).get('v') !== videoId) {
             return [];
         }
 
-        if (estado.transcriptJsonPorVideoId.has(videoId)) {
-            const sub = parsearRespuestaGetTranscript(JSON.parse(estado.transcriptJsonPorVideoId.get(videoId)));
+        // 1. Revisar si ya está en caché de get_transcript o timedtext
+        if (_transcriptJsonPorVideoId.has(videoId)) {
+            const sub = parsearRespuestaGetTranscript(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
             if (sub.length > 0) return sub;
         }
-        if (estado.subtitulosCachePorVideoId.has(videoId)) {
-            const cues = parsearPayloadSubtitulo(estado.subtitulosCachePorVideoId.get(videoId));
+        if (_subtitulosCachePorVideoId.has(videoId)) {
+            const cues = parsearPayloadSubtitulo(_subtitulosCachePorVideoId.get(videoId));
             if (cues && cues.length > 0) return decodeSubtitles(cues).filter(s => s.text.length > 0);
         }
 
-        activarSubtitulosMoviePlayer(false);
+        // 2. Activar subtítulos en movie_player y abrir panel de transcripción si existe
+        const player = win.document?.getElementById('movie_player');
+        if (player) {
+            player.loadModule?.('captions');
+            player.loadModule?.('cc');
+            const tracklist = player.getOption?.('captions', 'tracklist') || [];
+            const esp = tracklist.find(t => /^es/i.test(t.languageCode)) || tracklist[0];
+            if (esp) {
+                player.setOption?.('captions', 'track', esp);
+            }
+        }
 
         const btnTranscriptDom = document.querySelector(
             'ytd-video-description-transcript-section-renderer button, button[aria-label*="transcripci" i], button[aria-label*="transcript" i]'
@@ -365,12 +344,12 @@ export async function activarSubtitulosEnPlayerActivoDom(videoId) {
 
         const inicio = Date.now();
         while (Date.now() - inicio < 3200) {
-            if (estado.transcriptJsonPorVideoId.has(videoId)) {
-                const sub = parsearRespuestaGetTranscript(JSON.parse(estado.transcriptJsonPorVideoId.get(videoId)));
+            if (_transcriptJsonPorVideoId.has(videoId)) {
+                const sub = parsearRespuestaGetTranscript(JSON.parse(_transcriptJsonPorVideoId.get(videoId)));
                 if (sub.length > 0) return sub;
             }
-            if (estado.subtitulosCachePorVideoId.has(videoId)) {
-                const cues = parsearPayloadSubtitulo(estado.subtitulosCachePorVideoId.get(videoId));
+            if (_subtitulosCachePorVideoId.has(videoId)) {
+                const cues = parsearPayloadSubtitulo(_subtitulosCachePorVideoId.get(videoId));
                 if (cues && cues.length > 0) {
                     return decodeSubtitles(cues).filter(s => s.text.length > 0);
                 }
@@ -380,9 +359,7 @@ export async function activarSubtitulosEnPlayerActivoDom(videoId) {
                 const domCues = [];
                 segsDom.forEach(nodo => {
                     const tTxt = nodo.querySelector('.segment-timestamp, [class*="timestamp"]')?.textContent?.trim() || '0:00';
-                    const bTxt =
-                        nodo.querySelector('.segment-text, yt-formatted-string, [class*="segment-text"]')?.textContent?.trim() ||
-                        '';
+                    const bTxt = nodo.querySelector('.segment-text, yt-formatted-string, [class*="segment-text"]')?.textContent?.trim() || '';
                     if (bTxt) domCues.push({ tTxt, bTxt });
                 });
                 const convertidos = convertirDomCuesASubtitulos(domCues);
@@ -390,11 +367,37 @@ export async function activarSubtitulosEnPlayerActivoDom(videoId) {
             }
             await dormir(130);
         }
-    } catch {
-        // Devolver vacío para permitir capas posteriores.
-    }
+    } catch {}
     return [];
 }
+
+export function extraerFechaPublicacion(playerResponse, html = '') {
+    const mf = playerResponse?.microformat?.playerMicroformatRenderer;
+    const rawFecha =
+        mf?.publishDate ||
+        mf?.uploadDate ||
+        (html ? (
+            html.match(/"publishDate"\s*:\s*"(\d{4}-\d{2}-\d{2})/)?.[1] ||
+            html.match(/"uploadDate"\s*:\s*"(\d{4}-\d{2}-\d{2})/)?.[1] ||
+            html.match(/itemprop="datePublished"\s+content="(\d{4}-\d{2}-\d{2})/)?.[1]
+        ) : '') ||
+        '';
+
+    const m = String(rawFecha).match(/^(\d{4}-\d{2}-\d{2})/);
+    return m ? m[1] : '0000-00-00';
+}
+
+export function extraerPistasDePlayerResponse(pr) {
+    return (
+        pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks ||
+        pr?.captions?.playerCaptionsRenderer?.captionTracks ||
+        []
+    );
+}
+
+// ==================================================
+// PIPELINE MAESTRO DE EXTRACCIÓN (5 CAPAS DE INGENIERÍA ANTI-ROJO)
+// ==================================================
 
 export async function procesarVideoATxt(itemVideo) {
     verificarCancelacion();
@@ -413,11 +416,11 @@ export async function procesarVideoATxt(itemVideo) {
         location.pathname.includes('/watch') &&
         new URLSearchParams(location.search).get('v') === videoId;
 
-    // Capa 0: estado vivo de /watch cuando el usuario está dentro del propio video.
+    // CAPA 0: Si estamos dentro del propio video (/watch), usar directamente el estado vivo de la página
     if (enMismoVideoWatch) {
         try {
-            const snap = obtenerSnapshotPagina(videoId);
-            const prDom = snap?.pr;
+            const playerDom = win.document?.getElementById('movie_player');
+            const prDom = playerDom?.getPlayerResponse?.() || win.ytInitialPlayerResponse;
             if (prDom) {
                 if (prDom.videoDetails?.title) tituloReal = texto(prDom.videoDetails.title);
                 const fDom = extraerFechaPublicacion(prDom);
@@ -428,8 +431,8 @@ export async function procesarVideoATxt(itemVideo) {
                     pistaUsada = elegirPistaSubtitulo(pistasDom);
                 }
             }
-            if (snap?.initData) {
-                const strInit = JSON.stringify(snap.initData);
+            if (win.ytInitialData) {
+                const strInit = JSON.stringify(win.ytInitialData);
                 const re = /"getTranscriptEndpoint"\s*:\s*\{\s*"params"\s*:\s*"([^"]+)"/g;
                 let m;
                 while ((m = re.exec(strInit)) !== null) {
@@ -439,12 +442,10 @@ export async function procesarVideoATxt(itemVideo) {
                     }
                 }
             }
-        } catch {
-            // Continuar con descarga directa HTML + Innertube.
-        }
+        } catch {}
     }
 
-    // Capa 1: HTML ligero /watch + Innertube /next en paralelo.
+    // CAPA 1: Extracción ligera de HTML /watch + Innertube /next en paralelo para obtener fecha, título, pistas y getTranscriptEndpoint firmado
     if (!enMismoVideoWatch || fecha === '0000-00-00' || transcriptParamsHtml.length === 0) {
         try {
             const [rawHtml, paramsNext] = await Promise.all([
@@ -476,25 +477,24 @@ export async function procesarVideoATxt(itemVideo) {
             }
             transcriptParamsHtml = Array.from(new Set(transcriptParamsHtml));
         } catch (e) {
-            if (e.esCancelacion || estado.cancelado) throw e;
+            if (e.esCancelacion || cancelado) throw e;
         }
     }
 
-    // Capa 2: endpoint /youtubei/v1/get_transcript cuando no requiere traducción automática.
+    // CAPA 2: Descarga vía /youtubei/v1/get_transcript con los params oficiales (no requiere PO Token de reproductor)
     if (subtitulos.length === 0 && (transcriptParamsHtml.length > 0 || tuvoPistas)) {
         if (!pistaUsada?.necesitaTraducir || /^es/i.test(pistaUsada?.languageCode || 'es')) {
             subtitulos = await extraerSubtitulosViaGetTranscript(videoId, pistaUsada, transcriptParamsHtml);
         }
     }
 
-    // Capa 3: clientes móviles Innertube (ANDROID, IOS, MWEB, WEB_EMBEDDED).
+    // CAPA 3: Multi-Cliente Innertube (/youtubei/v1/player con ANDROID, IOS, MWEB, WEB_EMBEDDED)
+    // Las pistas devueltas por clientes móviles tienen URLs firmadas que descargan el XML/JSON3 al primer intento sin bloqueo de PO Token.
     if (subtitulos.length === 0) {
         const infoMovil = await obtenerPlayerMultiCliente(videoId, visitorDataVideo);
         if (infoMovil) {
             if (infoMovil.titulo && (!tituloReal || tituloReal === videoId)) tituloReal = infoMovil.titulo;
-            if (infoMovil.fecha && infoMovil.fecha !== '0000-00-00' && fecha === '0000-00-00') {
-                fecha = infoMovil.fecha;
-            }
+            if (infoMovil.fecha && infoMovil.fecha !== '0000-00-00' && fecha === '0000-00-00') fecha = infoMovil.fecha;
             if (infoMovil.pistas?.length > 0) {
                 tuvoPistas = true;
                 const pistaMovil = elegirPistaSubtitulo(infoMovil.pistas);
@@ -506,20 +506,22 @@ export async function procesarVideoATxt(itemVideo) {
         }
     }
 
-    // Capa 4: pista web directa y activación en reproductor DOM si estamos en /watch.
+    // CAPA 4: Si la pista web normal ya tiene PO Token o funciona directo, probarla
     if (subtitulos.length === 0 && pistaUsada?.baseUrl) {
         subtitulos = await obtenerSubtitulosRobusto(pistaUsada, videoId, 'es');
     }
 
+    // Si estamos en /watch y aún no salió, activar el DOM del reproductor actual
     if (subtitulos.length === 0 && enMismoVideoWatch) {
         subtitulos = await activarSubtitulosEnPlayerActivoDom(videoId);
     }
 
+    // Si la pista era en otro idioma y get_transcript está disponible, usar get_transcript antes de ir al iframe
     if (subtitulos.length === 0 && transcriptParamsHtml.length > 0) {
         subtitulos = await extraerSubtitulosViaGetTranscript(videoId, pistaUsada, transcriptParamsHtml);
     }
 
-    // Capa 5: pool de iframes reales /watch como respaldo definitivo.
+    // CAPA 5 (FALLBACK DEFINITIVO): Pool de Iframes /watch Reales con auto-apertura de CC y Panel de Transcripción
     if (subtitulos.length === 0 && !enMismoVideoWatch) {
         const resWorker = await extraerMedianteIframeWatchReal(videoId);
         if (resWorker) {
@@ -538,9 +540,7 @@ export async function procesarVideoATxt(itemVideo) {
                     try {
                         const parsedTr = JSON.parse(resWorker.rawTranscriptJson);
                         subtitulos = parsearRespuestaGetTranscript(parsedTr);
-                    } catch {
-                        // Pasar al siguiente origen del worker.
-                    }
+                    } catch {}
                 }
                 if (subtitulos.length === 0 && resWorker.domTranscriptCues) {
                     subtitulos = convertirDomCuesASubtitulos(resWorker.domTranscriptCues);
@@ -555,18 +555,16 @@ export async function procesarVideoATxt(itemVideo) {
                     subtitulos = await obtenerSubtitulosRobusto(pistaUsada, videoId, 'es');
                 }
                 if (subtitulos.length === 0 && resWorker.transcriptParams) {
-                    subtitulos = await extraerSubtitulosViaGetTranscript(videoId, pistaUsada, [
-                        resWorker.transcriptParams
-                    ]);
+                    subtitulos = await extraerSubtitulosViaGetTranscript(videoId, pistaUsada, [resWorker.transcriptParams]);
                 }
             }
         }
     }
 
-    estado.subtitulosCachePorVideoId.delete(videoId);
-    estado.transcriptJsonPorVideoId.delete(videoId);
+    _subtitulosCachePorVideoId.delete(videoId);
+    _transcriptJsonPorVideoId.delete(videoId);
 
-    // Regla estricta del color azul: solo aplica cuando ninguna fuente reportó pistas disponibles.
+    // REGLA ESTRICTA DEL COLOR AZUL:
     if (!tuvoPistas && subtitulos.length === 0) {
         const err = new Error(
             `No existe posibilidad de sacar subtítulos porque el video no tiene ninguno habilitado (${estadoPlayability})`
@@ -576,7 +574,9 @@ export async function procesarVideoATxt(itemVideo) {
     }
 
     if (subtitulos.length === 0) {
-        throw new Error(`No se pudo extraer el cuerpo del subtítulo (${pistaUsada?.languageCode || 'es'})`);
+        throw new Error(
+            `No se pudo extraer el cuerpo del subtítulo (${pistaUsada?.languageCode || 'es'})`
+        );
     }
 
     const contenidoTxt = construirArchivoTxt(subtitulos, {

@@ -1,4 +1,4 @@
-// Puente DOM hacia background.js y cargador de módulos locales si no hay bundle remoto registrado.
+// Puente DOM entre el mundo MAIN y background.js (peticiones HTTP, abort, notificaciones e inicio).
 
 (() => {
     'use strict';
@@ -65,6 +65,7 @@
         try {
             chrome.runtime.sendMessage({
                 action: 'MAXIMUS_NOTIFY',
+                notifId: detalle.notifId,
                 title: detalle.title,
                 message: detalle.message,
                 url: detalle.url
@@ -74,44 +75,21 @@
         }
     });
 
-    const cargarModulosLocales = async () => {
-        if (document.documentElement?.dataset?.maximusYtIniciado === '1') {
-            return;
+    chrome.runtime.onMessage.addListener(mensaje => {
+        if (mensaje?.action === 'MAXIMUS_NOTIFY_CLICKED' && mensaje.notifId) {
+            window.dispatchEvent(
+                new CustomEvent('maximus-bridge-notify-clicked', {
+                    detail: { notifId: mensaje.notifId }
+                })
+            );
         }
-        try {
-            const urlModulo = chrome.runtime.getURL('modules/main.js');
-            await import(urlModulo);
-        } catch (err) {
-            console.error('[Canal de YouTube a TXT] Falló la carga de módulos:', err);
-        }
-    };
+    });
 
-    const consultarInicio = () =>
-        new Promise(resolve => {
-            try {
-                chrome.runtime.sendMessage({ action: 'MAXIMUS_INIT_TAB' }, respuesta => {
-                    if (chrome.runtime.lastError) {
-                        resolve({ inyectadoRemoto: false });
-                        return;
-                    }
-                    resolve(respuesta || { inyectadoRemoto: false });
-                });
-            } catch {
-                resolve({ inyectadoRemoto: false });
-            }
+    try {
+        chrome.runtime.sendMessage({ action: 'MAXIMUS_INIT_TAB' }, () => {
+            void chrome.runtime.lastError;
         });
-
-    (async () => {
-        const info = await consultarInicio();
-
-        if (info.inyectadoRemoto) {
-            await new Promise(r => setTimeout(r, 300));
-            if (document.documentElement?.dataset?.maximusYtIniciado !== '1') {
-                await cargarModulosLocales();
-            }
-            return;
-        }
-
-        await cargarModulosLocales();
-    })();
+    } catch {
+        // Ignorar si el contexto de la extensión acaba de recargarse.
+    }
 })();

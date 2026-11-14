@@ -1,8 +1,14 @@
-// Peticiones HTTP (fetch, puente de extensión y GM_xmlhttpRequest), autenticación SAPISIDHASH y pausa ante reCAPTCHA.
+import { win, CFG, abortadoresActivos } from './config.js';
+import { panelCanal, cancelado, verificarCancelacion } from './main.js';
 
-import { CFG, estado, verificarCancelacion } from './config.js';
-import { obtenerSnapshotPagina } from './utils.js';
-import { limpiarTodosLosIframesTrabajadores } from './worker-iframe.js';
+export let enPausaPorCaptcha = false;
+let resolverCaptchaFn = null;
+export let urlCaptchaActivo = '';
+let timerAutoVerificacionCaptcha = null;
+
+// ==================================================
+// AUTENTICACIÓN SAPISIDHASH Y HEADERS NATIVOS INNERTUBE DE YOUTUBE
+// ==================================================
 
 export function leerCookie(nombre) {
     const m = document.cookie.match(new RegExp('(?:^|;\\s*)' + nombre + '=([^;]*)'));
@@ -26,21 +32,25 @@ export async function calcularSapisidHash(origin = 'https://www.youtube.com') {
 }
 
 export function obtenerConfigYtcfg() {
-    const snap = obtenerSnapshotPagina();
-    const ytcfg = snap?.ytcfg || {};
-    const ctx = ytcfg.fullContext || null;
-
+    const get = k => {
+        try {
+            return win.ytcfg?.get?.(k) ?? win.ytcfg?.data_?.[k];
+        } catch {
+            return undefined;
+        }
+    };
+    const ctx = get('INNERTUBE_CONTEXT');
     return {
-        apiKey: ytcfg.apiKey || '',
-        clientVersion: ytcfg.clientVersion || ctx?.client?.clientVersion || '2.20260401.01.00',
-        clientName: ytcfg.clientName || 1,
-        visitorData: ytcfg.visitorData || ctx?.client?.visitorData || '',
-        sessionIndex: String(ytcfg.sessionIndex ?? '0'),
-        delegatedSessionId: ytcfg.delegatedSessionId || '',
-        sts: ytcfg.sts || null,
+        apiKey: get('INNERTUBE_API_KEY') || '',
+        clientVersion: get('INNERTUBE_CLIENT_VERSION') || ctx?.client?.clientVersion || '2.20260401.01.00',
+        clientName: get('INNERTUBE_CONTEXT_CLIENT_NAME') || 1,
+        visitorData: get('VISITOR_DATA') || ctx?.client?.visitorData || '',
+        sessionIndex: String(get('SESSION_INDEX') ?? '0'),
+        delegatedSessionId: get('DELEGATED_SESSION_ID') || '',
+        sts: get('STS') || null,
         hl: ctx?.client?.hl || 'es',
         gl: ctx?.client?.gl || 'ES',
-        fullContext: ctx
+        fullContext: ctx || null
     };
 }
 
@@ -51,7 +61,7 @@ export async function construirHeadersInnerTube(incluirAuth = true) {
         'X-Youtube-Client-Name': String(cfg.clientName || 1),
         'X-Youtube-Client-Version': String(cfg.clientVersion || '2.20260401.01.00'),
         'X-Origin': 'https://www.youtube.com',
-        Origin: 'https://www.youtube.com',
+        'Origin': 'https://www.youtube.com',
         'X-Goog-AuthUser': cfg.sessionIndex || '0'
     };
     if (cfg.visitorData) headers['X-Goog-Visitor-Id'] = cfg.visitorData;
@@ -59,15 +69,19 @@ export async function construirHeadersInnerTube(incluirAuth = true) {
 
     if (incluirAuth) {
         const auth = await calcularSapisidHash('https://www.youtube.com');
-        if (auth) headers.Authorization = auth;
+        if (auth) headers['Authorization'] = auth;
     }
 
     return { headers, cfg };
 }
 
+// ==================================================
+// NOTIFICACIONES Y ALERTA SONORA ANTE CAPTCHA
+// ==================================================
+
 export function emitirPitidoAlerta() {
     try {
-        const AudioCtx = window.AudioContext || window.webkitAudioContext || estado.win?.AudioContext;
+        const AudioCtx = window.AudioContext || window.webkitAudioContext || unsafeWindow.AudioContext;
         if (!AudioCtx) return;
         const ctx = new AudioCtx();
         const osc = ctx.createOscillator();
@@ -79,7 +93,7 @@ export function emitirPitidoAlerta() {
         osc.type = 'sine';
         osc.frequency.setValueAtTime(659.25, ctx.currentTime);
         osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15);
-        osc.frequency.setValueAtTime(1046.5, ctx.currentTime + 0.3);
+        osc.frequency.setValueAtTime(1046.50, ctx.currentTime + 0.3);
 
         gain.gain.setValueAtTime(0.25, ctx.currentTime);
         gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
@@ -87,15 +101,9 @@ export function emitirPitidoAlerta() {
         osc.start(ctx.currentTime);
         osc.stop(ctx.currentTime + 0.6);
         setTimeout(() => {
-            try {
-                ctx.close();
-            } catch {
-                // El contexto pudo cerrarse antes del temporizador.
-            }
+            try { ctx.close(); } catch {}
         }, 800);
-    } catch {
-        // Ignorar si el navegador bloquea WebAudio sin gesto previo.
-    }
+    } catch {}
 }
 
 export function enviarNotificacion(titulo, cuerpo, urlAbrir) {
@@ -108,55 +116,19 @@ export function enviarNotificacion(titulo, cuerpo, urlAbrir) {
                 highlight: true,
                 timeout: 25000,
                 onclick: () => {
-                    try {
-                        window.focus();
-                    } catch {
-                        // Sin acceso al foco.
-                    }
+                    try { window.focus(); } catch {}
                     if (urlAbrir) {
-                        try {
-                            window.open(urlAbrir, '_blank');
-                        } catch {
-                            // Popups bloqueados.
-                        }
+                        try { window.open(urlAbrir, '_blank'); } catch {}
                     }
                 }
             });
-            return;
         }
-
-        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-            chrome.runtime.sendMessage({
-                action: 'MAXIMUS_NOTIFY',
-                title: titulo,
-                message: cuerpo,
-                url: urlAbrir
-            });
-            return;
-        }
-
-        if (document.documentElement?.dataset?.maximusBridge === '1') {
-            window.dispatchEvent(
-                new CustomEvent('maximus-bridge-notify', {
-                    detail: { title: titulo, message: cuerpo, url: urlAbrir }
-                })
-            );
-            return;
-        }
-
-        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-            const n = new Notification(titulo, { body: cuerpo });
-            if (urlAbrir) {
-                n.onclick = () => {
-                    window.focus();
-                    window.open(urlAbrir, '_blank');
-                };
-            }
-        }
-    } catch {
-        // No detener el flujo si fallan las notificaciones del sistema.
-    }
+    } catch {}
 }
+
+// ==================================================
+// DETECCIÓN Y GESTIÓN DE RECAPTCHA / BOT DETECTION
+// ==================================================
 
 export function esRespuestaCaptcha(status, textoResp, finalUrl) {
     if (status === 429) return true;
@@ -178,240 +150,82 @@ export function esRespuestaCaptcha(status, textoResp, finalUrl) {
 }
 
 export function activarPausaPorCaptcha(url) {
-    if (estado.enPausaPorCaptcha) return;
-    estado.enPausaPorCaptcha = true;
-    estado.urlCaptchaActivo = url || 'https://www.youtube.com/';
+    if (enPausaPorCaptcha) return;
+    enPausaPorCaptcha = true;
+    urlCaptchaActivo = url || 'https://www.youtube.com/';
 
     emitirPitidoAlerta();
     enviarNotificacion(
         '⚠️ YouTube a TXT: ¡Saltó el reCAPTCHA!',
-        '¡Saltó el reCAPTCHA! Ábrelo, resuélvelo manualmente y pulsa Continuar en el panel.',
-        estado.urlCaptchaActivo
+        '¡A yapo saltó el reCAPTCHA! Tomás, mira esto es tuyo: resuélvelo que te espero para continuar.',
+        urlCaptchaActivo
     );
 
-    if (estado.panelCanal) {
-        estado.panelCanal.panel.classList.add('alerta-captcha');
-        if (estado.panelCanal.btnCaptcha) {
-            estado.panelCanal.btnCaptcha.hidden = false;
-            estado.panelCanal.btnCaptcha.textContent = '⚡ Resolver Captcha y Continuar';
-            estado.panelCanal.btnCaptcha.title = 'Haz clic para abrir el captcha en una pestaña y reanudar';
+    if (panelCanal) {
+        panelCanal.panel.classList.add('alerta-captcha');
+        if (panelCanal.btnCaptcha) {
+            panelCanal.btnCaptcha.hidden = false;
+            panelCanal.btnCaptcha.textContent = '⚡ Resolver Captcha y Continuar';
+            panelCanal.btnCaptcha.title = 'Haz clic para abrir el captcha y reanudar';
         }
-        estado.panelCanal.estado.textContent =
-            '⚠️ Saltó el reCAPTCHA: resuélvelo manualmente y luego pulsa "Ya lo resolví, ¡Continuar!".';
+        panelCanal.estado.textContent =
+            '⚠️ ¡A yapo saltó el reCAPTCHA! Tomás, mira esto es tuyo: resuélvelo que te espero para continuar...';
     }
+
+    clearInterval(timerAutoVerificacionCaptcha);
+    timerAutoVerificacionCaptcha = setInterval(async () => {
+        if (!enPausaPorCaptcha || cancelado) {
+            clearInterval(timerAutoVerificacionCaptcha);
+            return;
+        }
+        try {
+            const test = await peticionHttpBaja('https://www.youtube.com/?hl=es', { timeout: 8000 });
+            if (test.status === 200 && !esRespuestaCaptcha(test.status, test.text, test.finalUrl)) {
+                clearInterval(timerAutoVerificacionCaptcha);
+                reanudarDespuesDeCaptcha();
+            }
+        } catch {}
+    }, 4500);
 }
 
 export function esperarResolucionCaptcha() {
-    if (!estado.enPausaPorCaptcha) return Promise.resolve();
+    if (!enPausaPorCaptcha) return Promise.resolve();
     return new Promise(resolve => {
-        estado.resolverCaptchaFn = resolve;
+        resolverCaptchaFn = resolve;
     });
 }
 
 export function reanudarDespuesDeCaptcha() {
-    if (!estado.enPausaPorCaptcha) return;
-    estado.enPausaPorCaptcha = false;
-    estado.urlCaptchaActivo = '';
+    clearInterval(timerAutoVerificacionCaptcha);
+    if (!enPausaPorCaptcha) return;
+    enPausaPorCaptcha = false;
+    urlCaptchaActivo = '';
 
-    if (estado.panelCanal) {
-        estado.panelCanal.panel.classList.remove('alerta-captcha');
-        if (estado.panelCanal.btnCaptcha) {
-            estado.panelCanal.btnCaptcha.hidden = true;
-            delete estado.panelCanal.btnCaptcha.dataset.abierto;
+    if (panelCanal) {
+        panelCanal.panel.classList.remove('alerta-captcha');
+        if (panelCanal.btnCaptcha) {
+            panelCanal.btnCaptcha.hidden = true;
+            delete panelCanal.btnCaptcha.dataset.abierto;
         }
-        estado.panelCanal.estado.textContent = 'Captcha resuelto. Reanudando descargas...';
+        panelCanal.estado.textContent = 'Captcha resuelto. Reanudando descargas...';
     }
 
-    if (typeof estado.resolverCaptchaFn === 'function') {
-        const fn = estado.resolverCaptchaFn;
-        estado.resolverCaptchaFn = null;
+    if (typeof resolverCaptchaFn === 'function') {
+        const fn = resolverCaptchaFn;
+        resolverCaptchaFn = null;
         fn();
     }
 }
 
-export function cancelarDescargaActiva() {
-    if (!estado.ocupado) return;
-    estado.cancelado = true;
-    if (estado.enPausaPorCaptcha) {
-        reanudarDespuesDeCaptcha();
-    }
-    limpiarTodosLosIframesTrabajadores();
-    for (const abortar of estado.abortadoresActivos) {
-        try {
-            abortar();
-        } catch {
-            // La petición ya pudo haber cerrado.
-        }
-    }
-    estado.abortadoresActivos.clear();
-    if (estado.panelCanal?.estado) {
-        estado.panelCanal.estado.textContent = 'Deteniendo descarga...';
-    }
-}
+// ==================================================
+// PETICIONES HTTP CON TRANSPORTE GM ROBUSTO Y CANCELACIÓN
+// ==================================================
 
-function obtenerGmTransporte() {
+export function obtenerGmTransporte() {
     if (typeof GM_xmlhttpRequest === 'function') return GM_xmlhttpRequest;
     if (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function') return GM.xmlHttpRequest;
     if (typeof window !== 'undefined' && typeof window.GM_xmlhttpRequest === 'function') return window.GM_xmlhttpRequest;
-    if (typeof unsafeWindow !== 'undefined' && typeof unsafeWindow.GM_xmlhttpRequest === 'function') {
-        return unsafeWindow.GM_xmlhttpRequest;
-    }
-    return null;
-}
-
-function peticionViaBackground(url, opciones, timeout) {
-    const method = (opciones.method || 'GET').toUpperCase();
-    const headers = {
-        Accept: '*/*',
-        'Accept-Language': 'es-419,es;q=0.9',
-        ...(opciones.headers || {})
-    };
-    const body = opciones.body || opciones.data || undefined;
-    const anonymous = Boolean(opciones.anonymous);
-
-    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-        return new Promise((resolve, reject) => {
-            if (estado.cancelado) {
-                const err = new Error('Descarga detenida por el usuario');
-                err.esCancelacion = true;
-                return reject(err);
-            }
-
-            let finalizado = false;
-            const requestId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-
-            const abortar = () => {
-                if (finalizado) return;
-                finalizado = true;
-                clearTimeout(timer);
-                estado.abortadoresActivos.delete(abortar);
-                try {
-                    chrome.runtime.sendMessage({ action: 'MAXIMUS_ABORT', requestId });
-                } catch {
-                    // Ignorar si el worker no está activo.
-                }
-                const err = new Error('Descarga detenida por el usuario');
-                err.esCancelacion = true;
-                reject(err);
-            };
-
-            estado.abortadoresActivos.add(abortar);
-
-            const timer = setTimeout(() => {
-                if (finalizado) return;
-                finalizado = true;
-                estado.abortadoresActivos.delete(abortar);
-                try {
-                    chrome.runtime.sendMessage({ action: 'MAXIMUS_ABORT', requestId });
-                } catch {
-                    // Ignorar.
-                }
-                reject(new Error('Tiempo agotado'));
-            }, timeout);
-
-            chrome.runtime.sendMessage(
-                {
-                    action: 'MAXIMUS_HTTP_REQUEST',
-                    requestId,
-                    url,
-                    method,
-                    headers,
-                    body,
-                    anonymous,
-                    timeout
-                },
-                respuesta => {
-                    if (finalizado) return;
-                    finalizado = true;
-                    clearTimeout(timer);
-                    estado.abortadoresActivos.delete(abortar);
-
-                    if (chrome.runtime.lastError) {
-                        return reject(new Error(chrome.runtime.lastError.message || 'Error en background'));
-                    }
-                    if (!respuesta || respuesta.error) {
-                        return reject(new Error(respuesta?.error || 'Error de red en background'));
-                    }
-                    resolve({
-                        status: respuesta.status,
-                        text: respuesta.text || '',
-                        finalUrl: respuesta.finalUrl || url
-                    });
-                }
-            );
-        });
-    }
-
-    if (document.documentElement?.dataset?.maximusBridge === '1') {
-        return new Promise((resolve, reject) => {
-            if (estado.cancelado) {
-                const err = new Error('Descarga detenida por el usuario');
-                err.esCancelacion = true;
-                return reject(err);
-            }
-
-            let finalizado = false;
-            const requestId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-            const eventoRespuesta = `maximus-bridge-res-${requestId}`;
-
-            const limpiar = () => {
-                clearTimeout(timer);
-                estado.abortadoresActivos.delete(abortar);
-                window.removeEventListener(eventoRespuesta, onRespuesta);
-            };
-
-            const abortar = () => {
-                if (finalizado) return;
-                finalizado = true;
-                limpiar();
-                window.dispatchEvent(new CustomEvent('maximus-bridge-abort', { detail: { requestId } }));
-                const err = new Error('Descarga detenida por el usuario');
-                err.esCancelacion = true;
-                reject(err);
-            };
-
-            const onRespuesta = e => {
-                if (finalizado) return;
-                finalizado = true;
-                limpiar();
-                const respuesta = e.detail;
-                if (!respuesta || respuesta.error) {
-                    return reject(new Error(respuesta?.error || 'Error de red en puente DOM'));
-                }
-                resolve({
-                    status: respuesta.status,
-                    text: respuesta.text || '',
-                    finalUrl: respuesta.finalUrl || url
-                });
-            };
-
-            estado.abortadoresActivos.add(abortar);
-            window.addEventListener(eventoRespuesta, onRespuesta, { once: true });
-
-            const timer = setTimeout(() => {
-                if (finalizado) return;
-                finalizado = true;
-                limpiar();
-                window.dispatchEvent(new CustomEvent('maximus-bridge-abort', { detail: { requestId } }));
-                reject(new Error('Tiempo agotado'));
-            }, timeout);
-
-            window.dispatchEvent(
-                new CustomEvent('maximus-bridge-http', {
-                    detail: {
-                        requestId,
-                        url,
-                        method,
-                        headers,
-                        body,
-                        anonymous,
-                        timeout
-                    }
-                })
-            );
-        });
-    }
-
+    if (typeof unsafeWindow !== 'undefined' && typeof unsafeWindow.GM_xmlhttpRequest === 'function') return unsafeWindow.GM_xmlhttpRequest;
     return null;
 }
 
@@ -426,12 +240,11 @@ export function peticionHttpBaja(url, opciones = {}) {
     };
     const data = opciones.body || opciones.data || undefined;
     const anonymous = Boolean(opciones.anonymous);
-    const timeout = opciones.timeout || CFG.TIMEOUT;
     const gm = obtenerGmTransporte();
 
     if (gm && !opciones.preferirFetch) {
         return new Promise((resolve, reject) => {
-            if (estado.cancelado) {
+            if (cancelado) {
                 const err = new Error('Descarga detenida por el usuario');
                 err.esCancelacion = true;
                 return reject(err);
@@ -444,36 +257,28 @@ export function peticionHttpBaja(url, opciones = {}) {
                 if (finalizado) return;
                 finalizado = true;
                 clearTimeout(timer);
-                estado.abortadoresActivos.delete(abortar);
-                try {
-                    req?.abort?.();
-                } catch {
-                    // Ignorar.
-                }
+                abortadoresActivos.delete(abortar);
+                try { req?.abort?.(); } catch {}
                 const err = new Error('Descarga detenida por el usuario');
                 err.esCancelacion = true;
                 reject(err);
             };
 
-            estado.abortadoresActivos.add(abortar);
+            abortadoresActivos.add(abortar);
 
             const timer = setTimeout(() => {
                 if (finalizado) return;
                 finalizado = true;
-                estado.abortadoresActivos.delete(abortar);
-                try {
-                    req?.abort?.();
-                } catch {
-                    // Ignorar.
-                }
+                abortadoresActivos.delete(abortar);
+                try { req?.abort?.(); } catch {}
                 reject(new Error('Tiempo agotado'));
-            }, timeout);
+            }, opciones.timeout || CFG.TIMEOUT);
 
             const fin = (fn, val) => {
                 if (finalizado) return;
                 finalizado = true;
                 clearTimeout(timer);
-                estado.abortadoresActivos.delete(abortar);
+                abortadoresActivos.delete(abortar);
                 fn(val);
             };
 
@@ -488,7 +293,7 @@ export function peticionHttpBaja(url, opciones = {}) {
                     data,
                     withCredentials: !anonymous,
                     anonymous,
-                    timeout,
+                    timeout: opciones.timeout || CFG.TIMEOUT,
                     onload: r => {
                         fin(resolve, {
                             status: r.status,
@@ -510,60 +315,53 @@ export function peticionHttpBaja(url, opciones = {}) {
         });
     }
 
-    // En extensión MV3 usamos background.js cuando se piden llamadas sin cookies o fuera de preferirFetch.
-    if (!opciones.preferirFetch && !gm) {
-        const bgPromise = peticionViaBackground(url, opciones, timeout);
-        if (bgPromise) return bgPromise;
-    }
-
     return new Promise((resolve, reject) => {
-        const fetchFn = (estado.win && estado.win.fetch) || (typeof fetch === 'function' ? fetch : null);
+        const fetchFn = (win && win.fetch) || (typeof fetch === 'function' ? fetch : null);
         if (!fetchFn) {
             return reject(new Error('No hay transporte HTTP disponible'));
         }
 
         const ctrl = new AbortController();
         const abortar = () => ctrl.abort();
-        estado.abortadoresActivos.add(abortar);
-        const timer = setTimeout(() => ctrl.abort(), timeout);
+        abortadoresActivos.add(abortar);
+        const timer = setTimeout(() => ctrl.abort(), opciones.timeout || CFG.TIMEOUT);
 
-        fetchFn
-            .call(estado.win || window, url, {
-                method,
-                headers,
-                body: data,
-                credentials: anonymous ? 'omit' : 'include',
-                cache: 'no-store',
-                signal: ctrl.signal
-            })
-            .then(async res => {
-                const text = await res.text();
-                return {
-                    status: res.status,
-                    text,
-                    finalUrl: res.url || url
-                };
-            })
-            .then(resolve)
-            .catch(e => {
-                if (estado.cancelado || ctrl.signal.aborted) {
-                    const err = new Error('Descarga detenida por el usuario');
-                    err.esCancelacion = true;
-                    return reject(err);
-                }
-                reject(e);
-            })
-            .finally(() => {
-                clearTimeout(timer);
-                estado.abortadoresActivos.delete(abortar);
-            });
+        fetchFn.call(win, url, {
+            method,
+            headers,
+            body: data,
+            credentials: anonymous ? 'omit' : 'include',
+            cache: 'no-store',
+            signal: ctrl.signal
+        })
+        .then(async res => {
+            const text = await res.text();
+            return {
+                status: res.status,
+                text,
+                finalUrl: res.url || url
+            };
+        })
+        .then(resolve)
+        .catch(e => {
+            if (cancelado || ctrl.signal.aborted) {
+                const err = new Error('Descarga detenida por el usuario');
+                err.esCancelacion = true;
+                return reject(err);
+            }
+            reject(e);
+        })
+        .finally(() => {
+            clearTimeout(timer);
+            abortadoresActivos.delete(abortar);
+        });
     });
 }
 
 export async function peticionHttp(url, opciones = {}) {
     verificarCancelacion();
 
-    if (estado.enPausaPorCaptcha) {
+    if (enPausaPorCaptcha) {
         await esperarResolucionCaptcha();
         verificarCancelacion();
     }
