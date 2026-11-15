@@ -1,4 +1,10 @@
 import { obtenerRaizCanalDom } from './channel.js';
+import { crearElemento } from './utils.js';
+import {
+    leerConfigStt,
+    guardarConfigStt,
+    diagnosticarMotoresStt
+} from './subtitles.js';
 
 // ==================================================
 // CSS (ESTÉTICA MAXIMUS ORDEN + AZUL PARA VIDEOS SIN SUBTÍTULOS)
@@ -383,12 +389,235 @@ export function css() {
             border-radius: 8px !important;
         }
 
+        .maximus-audio-drawer {
+            grid-column: 1 / -1 !important;
+            display: flex !important;
+            flex-wrap: wrap !important;
+            align-items: center !important;
+            gap: 6px 10px !important;
+            padding: 8px !important;
+            border: 1px solid #cbd5e1 !important;
+            border-radius: 5px !important;
+            background: rgba(255, 255, 255, 0.85) !important;
+            font: 11px Arial, sans-serif !important;
+        }
+
+        .maximus-audio-drawer[hidden] {
+            display: none !important;
+        }
+
+        html[dark] .maximus-audio-drawer {
+            background: rgba(15, 23, 42, 0.72) !important;
+            border-color: #334155 !important;
+        }
+
+        .maximus-audio-grupo {
+            display: inline-flex !important;
+            align-items: center !important;
+            gap: 5px !important;
+        }
+
+        .maximus-audio-grupo[hidden] {
+            display: none !important;
+        }
+
+        .maximus-audio-input,
+        .maximus-audio-select {
+            height: 26px !important;
+            padding: 0 7px !important;
+            border: 1px solid #94a3b8 !important;
+            border-radius: 4px !important;
+            background: #ffffff !important;
+            color: #1e293b !important;
+            font: 11px Arial, sans-serif !important;
+            box-sizing: border-box !important;
+        }
+
+        html[dark] .maximus-audio-input,
+        html[dark] .maximus-audio-select {
+            background: #1e293b !important;
+            border-color: #475569 !important;
+            color: #e2e8f0 !important;
+        }
+
+        .maximus-audio-input {
+            width: 190px !important;
+        }
+
+        .maximus-audio-pill {
+            color: #0369a1 !important;
+            font-weight: 600 !important;
+        }
+
+        html[dark] .maximus-audio-pill {
+            color: #38bdf8 !important;
+        }
+
         @media (max-width: 720px) {
             .maximus-panel {
                 grid-template-columns: 1fr !important;
             }
         }
     `;
+}
+
+const OPCIONES_MOTOR_STT = [
+    ['auto', 'Auto (WebGPU Local / Gratis)'],
+    ['offscreen', 'Whisper Local (WebGPU/WASM PC)'],
+    ['groq', 'Groq API (whisper-large-v3-turbo)'],
+    ['gemini', 'Gemini API (gemini-2.5-flash)'],
+    ['hf_router', 'HuggingFace Router (Token)'],
+    ['local_http', 'Servidor Local (127.0.0.1)'],
+    ['hf_space', 'HF Space Público (Cuota corta)'],
+    ['off', 'Desactivado (Solo subtítulos)']
+];
+
+const OPCIONES_MODELO_LOCAL = [
+    ['onnx-community/whisper-small', 'whisper-small (Preciso · WebGPU)'],
+    ['onnx-community/whisper-base', 'whisper-base (Rápido · WebGPU)'],
+    ['onnx-community/whisper-tiny', 'whisper-tiny (Ligero · CPU/GPU)']
+];
+
+export function crearControlesConfigAudio() {
+    let cfg = leerConfigStt();
+
+    const botonAudio = crearElemento('button', {
+        className: 'maximus-boton',
+        type: 'button',
+        title: 'Configurar rescate Audio-a-TXT (Whisper WebGPU o API gratis) para videos sin subtítulos',
+        textContent: '⚙ Audio IA'
+    });
+    botonAudio.style.padding = '0 9px';
+    botonAudio.style.fontSize = '11px';
+
+    const selMotor = crearElemento('select', { className: 'maximus-audio-select' });
+    for (const [val, label] of OPCIONES_MOTOR_STT) {
+        const opt = document.createElement('option');
+        opt.value = val;
+        opt.textContent = label;
+        selMotor.appendChild(opt);
+    }
+    selMotor.value = cfg.motor || 'auto';
+
+    const selModeloLocal = crearElemento('select', { className: 'maximus-audio-select' });
+    for (const [val, label] of OPCIONES_MODELO_LOCAL) {
+        const opt = document.createElement('option');
+        opt.value = val;
+        opt.textContent = label;
+        selModeloLocal.appendChild(opt);
+    }
+    selModeloLocal.value = cfg.modeloLocal || 'onnx-community/whisper-small';
+
+    const grpModeloLocal = crearElemento('label', { className: 'maximus-audio-grupo' }, [
+        crearElemento('span', { textContent: 'Modelo:' }),
+        selModeloLocal
+    ]);
+
+    const inpKey = crearElemento('input', {
+        className: 'maximus-audio-input',
+        type: 'password',
+        autocomplete: 'off'
+    });
+    const lblKey = crearElemento('span', { textContent: 'Key:' });
+    const grpKey = crearElemento('label', { className: 'maximus-audio-grupo' }, [lblKey, inpKey]);
+
+    const pill = crearElemento('span', {
+        className: 'maximus-audio-pill',
+        textContent: ''
+    });
+
+    const btnProbar = crearElemento('button', {
+        className: 'maximus-boton',
+        type: 'button',
+        textContent: 'Probar motor'
+    });
+    btnProbar.style.height = '26px';
+    btnProbar.style.minHeight = '26px';
+    btnProbar.style.padding = '0 8px';
+    btnProbar.style.fontSize = '11px';
+
+    const drawerAudio = crearElemento(
+        'div',
+        { className: 'maximus-audio-drawer', hidden: true },
+        [
+            crearElemento('label', { className: 'maximus-audio-grupo' }, [
+                crearElemento('span', { textContent: 'Audio-a-TXT:' }),
+                selMotor
+            ]),
+            grpModeloLocal,
+            grpKey,
+            btnProbar,
+            pill
+        ]
+    );
+
+    const META_CAMPO_MOTOR = {
+        groq: { field: 'groqKey', label: 'Groq Key:', placeholder: 'gsk_... (gratis en console.groq.com)', type: 'password' },
+        gemini: { field: 'geminiKey', label: 'Gemini Key:', placeholder: 'AIza... (aistudio.google.com)', type: 'password' },
+        hf_router: { field: 'hfToken', label: 'HF Token:', placeholder: 'hf_... (huggingface.co/settings/tokens)', type: 'password' },
+        local_http: { field: 'localUrl', label: 'URL Whisper:', placeholder: 'http://127.0.0.1:8000/v1/audio/transcriptions', type: 'text' }
+    };
+
+    const sincronizarCampos = () => {
+        cfg = leerConfigStt();
+        const motor = selMotor.value;
+        grpModeloLocal.hidden = motor !== 'auto' && motor !== 'offscreen';
+        const meta = META_CAMPO_MOTOR[motor];
+        if (meta) {
+            grpKey.hidden = false;
+            lblKey.textContent = meta.label;
+            inpKey.type = meta.type;
+            inpKey.placeholder = meta.placeholder;
+            inpKey.value = cfg[meta.field] || '';
+        } else {
+            grpKey.hidden = true;
+        }
+    };
+
+    const refrescarEstadoBadge = async () => {
+        pill.textContent = 'Verificando...';
+        try {
+            const diag = await diagnosticarMotoresStt();
+            pill.textContent = diag.etiqueta;
+        } catch {
+            pill.textContent = 'Listo';
+        }
+    };
+
+    selMotor.addEventListener('change', () => {
+        guardarConfigStt({ motor: selMotor.value });
+        sincronizarCampos();
+        refrescarEstadoBadge();
+    });
+
+    selModeloLocal.addEventListener('change', () => {
+        guardarConfigStt({ modeloLocal: selModeloLocal.value });
+        refrescarEstadoBadge();
+    });
+
+    inpKey.addEventListener('change', () => {
+        const meta = META_CAMPO_MOTOR[selMotor.value];
+        if (!meta) return;
+        guardarConfigStt({ [meta.field]: inpKey.value.trim() });
+        refrescarEstadoBadge();
+    });
+
+    btnProbar.addEventListener('click', () => {
+        sincronizarCampos();
+        refrescarEstadoBadge();
+    });
+
+    botonAudio.addEventListener('click', () => {
+        drawerAudio.hidden = !drawerAudio.hidden;
+        if (!drawerAudio.hidden) {
+            sincronizarCampos();
+            refrescarEstadoBadge();
+        }
+    });
+
+    sincronizarCampos();
+
+    return { botonAudio, drawerAudio, refrescarEstadoBadge };
 }
 
 // ==================================================

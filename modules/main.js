@@ -42,7 +42,8 @@ import {
     crearPiezas,
     pieza,
     buscarAnclaDebajoSuscribirse,
-    insertarPanelEnAncla
+    insertarPanelEnAncla,
+    crearControlesConfigAudio
 } from './ui.js';
 
 export let panelCanal = null;
@@ -183,10 +184,12 @@ export function montarPanelCanal() {
         [btnModoTodos, btnModoUltimos, inputUltimos, btnModoPantalla]
     );
 
+    const { botonAudio, drawerAudio } = crearControlesConfigAudio();
+
     const controlesIzq = crearElemento(
         'div',
         { className: 'maximus-controles-izq' },
-        [boton, btnCaptcha, modosDiv]
+        [boton, btnCaptcha, modosDiv, botonAudio]
     );
 
     const aproxHeader = obtenerConteoAproximadoHeader();
@@ -221,7 +224,7 @@ export function montarPanelCanal() {
             className: 'maximus-panel',
             dataset: { maximus: 'panel-yt' }
         },
-        [controlesIzq, barra, pie]
+        [controlesIzq, barra, drawerAudio, pie]
     );
 
     insertarPanelEnAncla(panel, ancla);

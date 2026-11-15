@@ -1,8 +1,8 @@
 {
     "manifest_version": 3,
     "name": "Canal de YouTube a TXT | Maximus",
-    "version": "3.0.0",
-    "description": "Descarga transcripciones de canales, videos y Shorts de YouTube en TXT por bloques de 200 caracteres y árbol ASCII en ZIP.",
+    "version": "3.1.0",
+    "description": "Descarga transcripciones de canales, videos y Shorts de YouTube en TXT por bloques de 200 caracteres y árbol ASCII en ZIP (con rescate Audio-a-TXT Whisper).",
     "author": "tivp",
     "icons": {
         "16": "Transfomer Logo.png",
@@ -17,6 +17,7 @@
     "permissions": [
         "clipboardWrite",
         "notifications",
+        "offscreen",
         "storage",
         "scripting",
         "tabs",
@@ -28,8 +29,20 @@
         "https://youtube.com/*",
         "https://*.googlevideo.com/*",
         "https://raw.githubusercontent.com/*",
-        "https://api.github.com/*"
+        "https://api.github.com/*",
+        "https://api.groq.com/*",
+        "https://generativelanguage.googleapis.com/*",
+        "https://huggingface.co/*",
+        "https://*.huggingface.co/*",
+        "https://*.hf.co/*",
+        "https://*.hf.space/*",
+        "https://cdn.jsdelivr.net/*",
+        "http://127.0.0.1/*",
+        "http://localhost/*"
     ],
+    "content_security_policy": {
+        "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+    },
     "background": {
         "service_worker": "background.js"
     },

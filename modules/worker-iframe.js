@@ -8,8 +8,8 @@ import {
     callbacksWorkersIframe,
     iframesActivosSet
 } from './config.js';
-import { _potLatestParams } from './interceptor.js';
-import { generarParamsProtobufGetPanel } from './subtitles.js';
+import { _potLatestParams, _esAnuncioEnReproductor } from './interceptor.js';
+import { generarParamsProtobufGetPanel, elegirPistaSubtitulo } from './subtitles.js';
 import { verificarCancelacion } from './main.js';
 
 // ==================================================
@@ -65,6 +65,18 @@ if (esIframeTrabajador) {
         const mf = pr?.microformat?.playerMicroformatRenderer;
         const fecha = (mf?.publishDate || mf?.uploadDate || '').slice(0, 10) || '0000-00-00';
         const playabilityStatus = pr?.playabilityStatus?.status || 'OK';
+
+        if (paramsUrl.get('maximus_audio') === '1') {
+            await capturarAudioSourceBufferEnIframe({
+                workerVideoId,
+                player,
+                titulo,
+                fecha,
+                playabilityStatus,
+                silenciarBuffersDeVideo
+            });
+            return;
+        }
 
         let pistas =
             pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks ||
@@ -256,12 +268,7 @@ if (esIframeTrabajador) {
         }
 
         // 4. Descargar directamente la pista desde adentro del iframe
-        const esEspanol = code => /^es(?:-|$)/i.test(String(code || ''));
-        const elegida =
-            pistas.find(t => esEspanol(t.languageCode) && t.kind !== 'asr') ||
-            pistas.find(t => esEspanol(t.languageCode) && t.kind === 'asr') ||
-            pistas.find(t => t.kind !== 'asr') ||
-            pistas[0];
+        const elegida = elegirPistaSubtitulo(pistas);
 
         if (elegida?.baseUrl) {
             let urlPista = elegida.baseUrl.replace(/\\u0026/g, '&');
@@ -311,6 +318,219 @@ if (esIframeTrabajador) {
             potParams: _potParamsByVideoId.get(workerVideoId) || _potLatestParams
         }, '*');
     };
+
+    async function capturarAudioSourceBufferEnIframe({
+        workerVideoId,
+        player,
+        titulo,
+        fecha,
+        playabilityStatus,
+        silenciarBuffersDeVideo
+    }) {
+        const responder = payload => {
+            window.parent.postMessage(
+                {
+                    type: 'MAXIMUS_WORKER_DONE',
+                    videoId: workerVideoId,
+                    esAudioCaptura: true,
+                    titulo,
+                    fecha,
+                    playabilityStatus,
+                    ...payload
+                },
+                '*',
+                payload.audioBuffer instanceof ArrayBuffer ? [payload.audioBuffer] : undefined
+            );
+        };
+
+        try {
+            const durEsperada = Math.max(0, Number(paramsUrl.get('maximus_dur') || 0));
+            const clicarSaltarAnuncio = () => {
+                const adBtn = document.querySelector(
+                    '.ytp-ad-skip-button, .ytp-skip-ad-button, .ytp-ad-skip-button-modern'
+                );
+                if (adBtn) adBtn.click();
+            };
+
+            const adelantarAnuncioEnIframe = (videoEl, playerEl) => {
+                clicarSaltarAnuncio();
+                try {
+                    if (videoEl) {
+                        videoEl.playbackRate = 16;
+                        if (
+                            Number.isFinite(videoEl.duration) &&
+                            videoEl.duration > 0.6 &&
+                            videoEl.currentTime < videoEl.duration - 0.25
+                        ) {
+                            videoEl.currentTime = videoEl.duration - 0.1;
+                        }
+                    }
+                    const state = playerEl?.getPlayerState?.();
+                    if (state !== 1 && state !== 3) playerEl?.playVideo?.();
+                } catch {}
+            };
+
+            let v = null;
+            let mp = player || win.document?.getElementById('movie_player');
+            for (let i = 0; i < 300; i++) {
+                v = document.querySelector('video');
+                mp = mp || win.document?.getElementById('movie_player');
+                silenciarBuffersDeVideo();
+                try {
+                    mp?.mute?.();
+                    mp?.setPlaybackQualityRange?.('tiny', 'tiny');
+                    mp?.setPlaybackQuality?.('tiny');
+                    const state = mp?.getPlayerState?.();
+                    if (state !== 1 && state !== 3) mp?.playVideo?.();
+                } catch {}
+                const ad = _esAnuncioEnReproductor(mp, workerVideoId);
+                if (ad) {
+                    adelantarAnuncioEnIframe(v, mp);
+                } else if (v && v.playbackRate !== 1) {
+                    try {
+                        v.playbackRate = 1;
+                    } catch {}
+                }
+                const durActual = Number(v?.duration || 0);
+                const durCoincide =
+                    durActual > 0 &&
+                    (durEsperada <= 12 || durActual >= durEsperada * 0.72);
+                if (v && !ad && Number.isFinite(durActual) && durCoincide) break;
+                await new Promise(r => setTimeout(r, 150));
+            }
+
+            if (!v || !Number.isFinite(v.duration) || v.duration <= 0) {
+                responder({ error: 'Video sin duración reproducible en iframe' });
+                return;
+            }
+            try {
+                v.playbackRate = 1;
+            } catch {}
+
+            const esBufferVivo = ent => {
+                if (!ent?.sb) return false;
+                if (ent.ms && ent.ms.readyState === 'closed') return false;
+                try {
+                    void ent.sb.buffered;
+                    return true;
+                } catch {
+                    return false;
+                }
+            };
+            const seleccionarEntradaAudio = capState => {
+                let mejor = esBufferVivo(capState?.activeEntry) ? capState.activeEntry : null;
+                if (capState?.entries?.size) {
+                    for (const ent of capState.entries.values()) {
+                        if (!esBufferVivo(ent)) continue;
+                        if (!mejor || (ent?.bytes || 0) > (mejor?.bytes || 0)) {
+                            mejor = ent;
+                        }
+                    }
+                    if (!mejor) {
+                        for (const ent of capState.entries.values()) {
+                            if (!mejor || (ent?.bytes || 0) > (mejor?.bytes || 0)) {
+                                mejor = ent;
+                            }
+                        }
+                    }
+                }
+                return mejor || capState?.activeEntry || null;
+            };
+            const leerMaxEndSeguro = (sb, videoEl) => {
+                let max = 0;
+                const leerRanges = r => {
+                    for (let b = 0; b < (r?.length || 0); b++) {
+                        if (r.end(b) > max) max = r.end(b);
+                    }
+                };
+                try {
+                    if (sb?.buffered?.length) leerRanges(sb.buffered);
+                } catch {}
+                if (max <= 0) {
+                    try {
+                        if (videoEl?.buffered?.length) leerRanges(videoEl.buffered);
+                    } catch {}
+                }
+                return max;
+            };
+
+            let lastEnd = -1;
+            let lastBytes = 0;
+            let stalls = 0;
+            let lastSeekAt = 0;
+            let lastSeekEnd = -1;
+
+            for (let step = 0; step < 480; step++) {
+                silenciarBuffersDeVideo();
+                if (_esAnuncioEnReproductor(mp, workerVideoId)) {
+                    adelantarAnuncioEnIframe(v, mp);
+                    await new Promise(r => setTimeout(r, 250));
+                    continue;
+                }
+
+                const curEntry = seleccionarEntradaAudio(win.__chan2txtAudioCap);
+                const maxEnd = leerMaxEndSeguro(curEntry?.sb, v);
+
+                const curBytes = curEntry?.bytes || 0;
+                const liveDur = Number(v.duration) || 0;
+                const bytesGrew = curBytes > lastBytes + 64;
+                const endGrew = maxEnd > lastEnd + 0.05;
+
+                if (!endGrew && !bytesGrew) stalls++;
+                else stalls = 0;
+                lastEnd = maxEnd;
+                lastBytes = curBytes;
+
+                if (!Number.isFinite(liveDur) || maxEnd >= liveDur - 1.5 || stalls >= 40) {
+                    break;
+                }
+
+                const ahora = Date.now();
+                const bufferAvanzoDesdeUltimoSeek = maxEnd > lastSeekEnd + 1.0;
+                const reintentoPorPausa = !bytesGrew && stalls >= 10 && stalls % 10 === 0;
+                const cooldownListo = ahora - lastSeekAt >= 900;
+
+                // Solo hacer seek cuando el buffer avanzó (o tras estancamiento real) para no abortar descargas en curso.
+                if (cooldownListo && (lastSeekAt === 0 || bufferAvanzoDesdeUltimoSeek || reintentoPorPausa)) {
+                    const saltoExtra = reintentoPorPausa ? Math.min(20, (stalls / 10) * 6) : 0;
+                    const nextT = Math.min(liveDur - 0.5, maxEnd + 0.5 + saltoExtra);
+                    if (nextT >= liveDur - 1 && maxEnd >= liveDur - 5) break;
+                    lastSeekAt = ahora;
+                    lastSeekEnd = maxEnd;
+                    try {
+                        if (typeof mp?.seekTo === 'function') mp.seekTo(nextT, true);
+                        else v.currentTime = nextT;
+                        const st = mp?.getPlayerState?.();
+                        if (st !== 1 && st !== 3) mp?.playVideo?.();
+                    } catch {}
+                }
+                await new Promise(r => setTimeout(r, 250));
+            }
+
+            const entryFinal = seleccionarEntradaAudio(win.__chan2txtAudioCap);
+            const chunks = entryFinal?.chunks || [];
+            if (!chunks.length) {
+                responder({ error: 'SourceBuffer no recibió chunks de audio' });
+                return;
+            }
+
+            const totalLen = chunks.reduce((acc, c) => acc + c.byteLength, 0);
+            const joined = new Uint8Array(totalLen);
+            let off = 0;
+            for (const c of chunks) {
+                joined.set(c, off);
+                off += c.byteLength;
+            }
+
+            responder({
+                audioBuffer: joined.buffer,
+                audioMime: entryFinal.mime || 'audio/webm',
+                audioDuration: Number(v.duration) || 0
+            });
+        } catch (err) {
+            responder({ error: err?.message || 'Error capturando SourceBuffer de audio' });
+        }
+    }
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', intentarExtraccionDesdeAdentroDelIframe, { once: true });
@@ -368,7 +588,7 @@ export function limpiarTodosLosIframesTrabajadores() {
     iframesEnCurso = 0;
 }
 
-export async function extraerMedianteIframeWatchReal(videoId, timeoutMs = CFG.TIMEOUT_IFRAME) {
+async function lanzarWorkerIframeWatch(videoId, { querySuffix, timeoutMs }) {
     verificarCancelacion();
 
     while (iframesEnCurso >= CFG.MAX_IFRAMES_SIMULTANEOS) {
@@ -407,11 +627,25 @@ export async function extraerMedianteIframeWatchReal(videoId, timeoutMs = CFG.TI
                 'position:fixed;bottom:4px;right:4px;width:240px;height:135px;opacity:0.01;z-index:-9999;pointer-events:none;border:0;';
             iframe.setAttribute('aria-hidden', 'true');
             iframe.allow = 'autoplay';
-            iframe.src = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=es&cc_load_policy=1&maximus_worker=1`;
+            iframe.src = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=es${querySuffix}`;
             iframesActivosSet.add(iframe);
             (document.body || document.documentElement).appendChild(iframe);
         } catch {
             terminar(null);
         }
+    });
+}
+
+export function extraerMedianteIframeWatchReal(videoId, timeoutMs = CFG.TIMEOUT_IFRAME) {
+    return lanzarWorkerIframeWatch(videoId, {
+        querySuffix: '&cc_load_policy=1&maximus_worker=1',
+        timeoutMs
+    });
+}
+
+export function capturarAudioConIframeWatch(videoId, timeoutMs = 110000, expectedDurSec = 0) {
+    return lanzarWorkerIframeWatch(videoId, {
+        querySuffix: `&maximus_worker=1&maximus_audio=1&maximus_dur=${Math.max(0, Math.round(Number(expectedDurSec) || 0))}`,
+        timeoutMs
     });
 }

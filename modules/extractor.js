@@ -11,7 +11,10 @@ import {
     seguro,
     extraerJsonBalanceadoDesdeIndice
 } from './utils.js';
-import { extraerMedianteIframeWatchReal } from './worker-iframe.js';
+import {
+    extraerMedianteIframeWatchReal,
+    capturarAudioConIframeWatch
+} from './worker-iframe.js';
 import {
     calcularSapisidHash,
     construirHeadersInnerTube,
@@ -28,11 +31,17 @@ import {
     construirBloquesSubtitulos,
     construirArchivoTxt,
     elegirPistaSubtitulo,
+    esIdiomaScriptLatino,
     parseSubtitleVTT,
     parsearPayloadSubtitulo,
     parsearRespuestaGetTranscript,
     parsearRespuestaGetPanel,
-    convertirDomCuesASubtitulos
+    convertirDomCuesASubtitulos,
+    decodificarAudioAPcm16,
+    seleccionarMejorFormatoAudioDirecto,
+    descargarAudioDirectoCorto,
+    resolverMotoresSttActivos,
+    transcribirPcm16ConMotor
 } from './subtitles.js';
 import { cancelado, verificarCancelacion } from './main.js';
 
@@ -146,7 +155,13 @@ function elegirPistaInvidious(captions, idiomaPreferido = 'es', pistaPreferida =
     const prefAuto = pistas.find(p => esMismoIdioma(p.languageCode, baseObjetivo));
     if (prefAuto) return { ...prefAuto, necesitaTraducir: false };
 
-    if (pistaPreferida?.languageCode) {
+    const hayPistaLatina = pistas.some(p => esIdiomaScriptLatino(p.languageCode));
+    const prefEsAsrNoLatino =
+        pistaPreferida?.kind === 'asr' &&
+        !esIdiomaScriptLatino(pistaPreferida?.languageCode) &&
+        hayPistaLatina;
+
+    if (pistaPreferida?.languageCode && !prefEsAsrNoLatino) {
         const basePref = String(pistaPreferida.languageCode).toLowerCase().split('-')[0];
         const matchPref =
             pistas.find(p => p.languageCode.toLowerCase() === String(pistaPreferida.languageCode).toLowerCase()) ||
@@ -157,11 +172,17 @@ function elegirPistaInvidious(captions, idiomaPreferido = 'es', pistaPreferida =
     const enManual = pistas.find(p => esMismoIdioma(p.languageCode, 'en') && !p.esAuto);
     if (enManual) return { ...enManual, necesitaTraducir: true };
 
-    const enAuto = pistas.find(p => esMismoIdioma(p.languageCode, 'en'));
-    if (enAuto) return { ...enAuto, necesitaTraducir: true };
+    const latinManual = pistas.find(p => esIdiomaScriptLatino(p.languageCode) && !p.esAuto);
+    if (latinManual) return { ...latinManual, necesitaTraducir: true };
 
     const origManual = pistas.find(p => !p.esAuto);
     if (origManual) return { ...origManual, necesitaTraducir: true };
+
+    const enAuto = pistas.find(p => esMismoIdioma(p.languageCode, 'en'));
+    if (enAuto) return { ...enAuto, necesitaTraducir: true };
+
+    const latinAuto = pistas.find(p => esIdiomaScriptLatino(p.languageCode));
+    if (latinAuto) return { ...latinAuto, necesitaTraducir: true };
 
     return { ...pistas[0], necesitaTraducir: true };
 }
@@ -208,32 +229,62 @@ async function traducirSubtitulosGtx(subtitulos, idiomaOrigen = 'auto', idiomaDe
             i++;
         }
 
-        const q = batch.map(c => c.text).join('\n');
-        const trUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(baseSrc)}&tl=${encodeURIComponent(baseDst)}&dt=t&q=${encodeURIComponent(q)}`;
-        try {
-            const res = await fetchPublicoCors(trUrl, 7000);
-            if (res?.status === 200 && res.text) {
-                const parsed = JSON.parse(res.text);
-                if (Array.isArray(parsed?.[0])) {
-                    const textoTr = parsed[0].map(seg => seg?.[0] || '').join('');
-                    const lineasTr = textoTr.replace(/\r/g, '').split('\n');
-                    if (lineasTr.length === batch.length) {
-                        for (let j = 0; j < batch.length; j++) {
-                            salida.push({
-                                ...batch[j],
-                                text: lineasTr[j].trim() || batch[j].text
-                            });
-                        }
-                        continue;
-                    }
-                    salida.push(...distribuirTraduccionPorCaracteres(batch, textoTr));
-                    continue;
-                }
+        const traducirLoteConReintento = async (lote, intento = 0) => {
+            if (cancelado) { verificarCancelacion?.(); }
+            if (!lote.length) return [];
+
+            const q = lote.map(c => c.text).join('\n');
+            const encodedQ = encodeURIComponent(q);
+            if (encodedQ.length > 1700 && lote.length > 2) {
+                const mitad = Math.ceil(lote.length / 2);
+                const izq = await traducirLoteConReintento(lote.slice(0, mitad), intento);
+                await dormir(150);
+                const der = await traducirLoteConReintento(lote.slice(mitad), intento);
+                return [...izq, ...der];
             }
-        } catch (e) {
-            if (e?.esCancelacion || cancelado) throw e;
-        }
-        salida.push(...batch);
+
+            const trUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(baseSrc)}&tl=${encodeURIComponent(baseDst)}&dt=t&q=${encodedQ}`;
+            try {
+                const res = await fetchPublicoCors(trUrl, 9000);
+                if (res?.status === 200 && res.text) {
+                    const parsed = JSON.parse(res.text);
+                    if (Array.isArray(parsed?.[0])) {
+                        const textoTr = parsed[0].map(seg => seg?.[0] || '').join('');
+                        const lineasTr = textoTr.replace(/\r/g, '').split('\n');
+                        if (lineasTr.length === lote.length) {
+                            return lote.map((c, j) => ({
+                                ...c,
+                                text: lineasTr[j].trim() || c.text
+                            }));
+                        }
+                        return distribuirTraduccionPorCaracteres(lote, textoTr);
+                    }
+                }
+            } catch (e) {
+                if (e?.esCancelacion || cancelado) throw e;
+            }
+
+            if (intento < 3) {
+                const espera = (650 * (1 << intento)) + Math.floor(Math.random() * 350);
+                await dormir(espera);
+                return traducirLoteConReintento(lote, intento + 1);
+            }
+
+            if (lote.length > 4) {
+                const mitad = Math.ceil(lote.length / 2);
+                await dormir(300);
+                const izq = await traducirLoteConReintento(lote.slice(0, mitad), 1);
+                await dormir(300);
+                const der = await traducirLoteConReintento(lote.slice(mitad), 1);
+                return [...izq, ...der];
+            }
+
+            return lote;
+        };
+
+        const loteTraducido = await traducirLoteConReintento(batch);
+        salida.push(...loteTraducido);
+        await dormir(120);
     }
 
     return salida;
@@ -854,6 +905,7 @@ export async function procesarVideoATxt(itemVideo) {
     let estadoPlayability = 'OK';
     let transcriptParamsHtml = [];
     let visitorDataVideo = '';
+    let infoMovilParaAudio = null;
     let vinoDePanelModerno = false;
 
     const enMismoVideoWatch =
@@ -943,6 +995,7 @@ export async function procesarVideoATxt(itemVideo) {
                     if (e?.esCancelacion || cancelado) throw e;
                     return null;
                 });
+                if (infoMovil?.pr) infoMovilParaAudio = infoMovil;
 
                 if (infoMovil?.titulo && (!tituloReal || tituloReal === videoId)) tituloReal = infoMovil.titulo;
                 if (infoMovil?.fecha && infoMovil.fecha !== '0000-00-00' && fecha === '0000-00-00') {
@@ -1099,12 +1152,89 @@ export async function procesarVideoATxt(itemVideo) {
     _subtitulosCachePorVideoId.delete(videoId);
     _transcriptJsonPorVideoId.delete(videoId);
 
+    // CAPA 6 (RESCATE DE AUDIO-A-TXT): Whisper WebGPU/WASM local o APIs CORS gratuitas
+    let detalleAudioError = '';
+    if (subtitulos.length === 0 && !/LIVE_STREAM_OFFLINE|UNPLAYABLE/i.test(estadoPlayability)) {
+        try {
+            const motoresStt = await resolverMotoresSttActivos();
+            if (motoresStt.length > 0) {
+                verificarCancelacion();
+                let infoPlayerAudio = infoMovilParaAudio;
+                if (!infoPlayerAudio?.pr?.streamingData?.adaptiveFormats?.length) {
+                    infoPlayerAudio = await obtenerPlayerMultiCliente(videoId, visitorDataVideo).catch(e => {
+                        if (e?.esCancelacion || cancelado) throw e;
+                        return infoPlayerAudio;
+                    });
+                }
+                if (infoPlayerAudio?.titulo && (!tituloReal || tituloReal === videoId)) {
+                    tituloReal = infoPlayerAudio.titulo;
+                }
+                if (infoPlayerAudio?.fecha && infoPlayerAudio.fecha !== '0000-00-00' && fecha === '0000-00-00') {
+                    fecha = infoPlayerAudio.fecha;
+                }
+
+                const prAudio = infoPlayerAudio?.pr;
+                const durEsperada = Number(prAudio?.videoDetails?.lengthSeconds || 0);
+                const formatos = prAudio?.streamingData?.adaptiveFormats || [];
+                const mejorFormato = seleccionarMejorFormatoAudioDirecto(formatos);
+
+                const bytesFmt = Number(mejorFormato?.contentLength || 0);
+                let audioPcm = null;
+                if (mejorFormato && ((bytesFmt > 0 && bytesFmt <= 380000) || (durEsperada > 0 && durEsperada <= 24))) {
+                    audioPcm = await descargarAudioDirectoCorto(mejorFormato, durEsperada).catch(() => null);
+                }
+
+                if (!audioPcm?.pcm16?.length) {
+                    const timeoutAudio = Math.min(
+                        240000,
+                        Math.max(75000, (durEsperada || 120) * 160 + 45000)
+                    );
+                    const capIframe = await capturarAudioConIframeWatch(videoId, timeoutAudio, durEsperada);
+                    if (capIframe?.titulo && (!tituloReal || tituloReal === videoId)) {
+                        tituloReal = texto(capIframe.titulo);
+                    }
+                    if (capIframe?.fecha && capIframe.fecha !== '0000-00-00' && fecha === '0000-00-00') {
+                        fecha = capIframe.fecha;
+                    }
+                    if (capIframe?.audioBuffer instanceof ArrayBuffer && capIframe.audioBuffer.byteLength > 64) {
+                        audioPcm = await decodificarAudioAPcm16(capIframe.audioBuffer);
+                        capIframe.audioBuffer = null;
+                    } else if (capIframe?.error) {
+                        detalleAudioError = capIframe.error;
+                    }
+                }
+
+                if (audioPcm?.pcm16?.length) {
+                    verificarCancelacion();
+                    const resStt = await transcribirPcm16ConMotor(audioPcm.pcm16, audioPcm.duration, {
+                        lang: 'es',
+                        verificarCancelacion
+                    });
+                    if (Array.isArray(resStt?.subtitulos) && resStt.subtitulos.length > 0) {
+                        subtitulos = resStt.subtitulos;
+                        pistaUsada = {
+                            languageCode: resStt.idioma || 'es',
+                            kind: resStt.fuente || 'whisper',
+                            necesitaTraducir: false,
+                            etiquetaAudio: resStt.etiqueta || 'Audio IA'
+                        };
+                        tuvoPistas = true;
+                    }
+                }
+            }
+        } catch (e) {
+            if (e?.esCancelacion || cancelado) throw e;
+            detalleAudioError = e?.message || String(e || '');
+        }
+    }
+
     // REGLA ESTRICTA DEL COLOR AZUL:
     if (!tuvoPistas && subtitulos.length === 0) {
         const err = new Error(
             `No existe posibilidad de sacar subtítulos porque el video no tiene ninguno habilitado (${estadoPlayability})`
         );
         err.noTieneSubtitulos = true;
+        if (detalleAudioError) err.audioDetalle = detalleAudioError;
         throw err;
     }
 
@@ -1119,10 +1249,11 @@ export async function procesarVideoATxt(itemVideo) {
         videoId
     });
 
-    const idiomaEtiqueta =
-        (pistaUsada?.languageCode || 'es') +
-        (pistaUsada?.kind === 'asr' ? ' auto' : '') +
-        (pistaUsada?.necesitaTraducir && !vinoDePanelModerno ? ' -> es' : '');
+    const idiomaEtiqueta = pistaUsada?.etiquetaAudio
+        ? `${pistaUsada.languageCode || 'es'} (${pistaUsada.etiquetaAudio})`
+        : (pistaUsada?.languageCode || 'es') +
+          (pistaUsada?.kind === 'asr' ? ' auto' : '') +
+          (pistaUsada?.necesitaTraducir && !vinoDePanelModerno ? ' -> es' : '');
 
     return {
         fecha,

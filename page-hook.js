@@ -65,6 +65,7 @@
                     opts.onload({
                         status: payload.status ?? 0,
                         responseText: payload.text ?? '',
+                        responseBase64: payload.base64 ?? '',
                         finalUrl: payload.finalUrl || opts.url
                     });
                 }
@@ -91,6 +92,8 @@
                         method: opts.method || 'GET',
                         headers: opts.headers ? { ...opts.headers } : {},
                         body: opts.data,
+                        bodyBase64: opts.bodyBase64 || '',
+                        responseType: opts.responseType || 'text',
                         anonymous: Boolean(opts.anonymous),
                         timeout: timeoutMs
                     }

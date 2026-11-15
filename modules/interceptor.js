@@ -132,6 +132,106 @@ export function _installPotHooksOnce() {
 }
 _installPotHooksOnce();
 
+export function _esAnuncioEnReproductor(mp, workerVideoId = '') {
+    if (!mp) return false;
+    if (
+        mp.classList.contains('ad-showing') ||
+        mp.classList.contains('ad-interrupting') ||
+        mp.classList.contains('ytp-ad-playing') ||
+        mp.classList.contains('ytp-ad-showing')
+    ) {
+        return true;
+    }
+    try {
+        const vd = mp.getVideoData?.();
+        if (workerVideoId && vd?.video_id && vd.video_id !== workerVideoId) {
+            return true;
+        }
+    } catch {}
+    return false;
+}
+
+function _esSegmentoInitMedia(u8) {
+    if (!u8 || u8.byteLength < 8) return false;
+    // WebM EBML header: 1A 45 DF A3
+    if (u8[0] === 0x1a && u8[1] === 0x45 && u8[2] === 0xdf && u8[3] === 0xa3) return true;
+    // MP4 ftyp box
+    if (u8[4] === 0x66 && u8[5] === 0x74 && u8[6] === 0x79 && u8[7] === 0x70) return true;
+    return false;
+}
+
+export function _installAudioSourceBufferHookOnce() {
+    if (!esIframeTrabajador || !location.search.includes('maximus_audio=1')) return;
+    if (win.__chan2txtAudioCap?.instalado) return;
+    if (!win?.MediaSource?.prototype || !win?.SourceBuffer?.prototype) return;
+
+    try {
+        const paramsAudio = new URLSearchParams(location.search);
+        const workerVid =
+            paramsAudio.get('v') ||
+            (location.pathname.match(/\/shorts\/([^/?]+)/)?.[1] || '');
+
+        const cap = {
+            instalado: true,
+            workerVideoId: workerVid,
+            vioAnuncio: false,
+            entries: new Map(),
+            activeEntry: null,
+            mime: '',
+            totalBytes: 0,
+            lastAppendAt: 0,
+            seq: 1
+        };
+        win.__chan2txtAudioCap = cap;
+
+        const origAdd = win.MediaSource.prototype.addSourceBuffer;
+        win.MediaSource.prototype.addSourceBuffer = function (mime) {
+            const sb = origAdd.call(this, mime);
+            if (String(mime).startsWith('audio/')) {
+                cap.entries.set(sb, {
+                    id: cap.seq++,
+                    ms: this,
+                    sb,
+                    mime: String(mime),
+                    chunks: [],
+                    bytes: 0
+                });
+            }
+            return sb;
+        };
+
+        const origAppend = win.SourceBuffer.prototype.appendBuffer;
+        win.SourceBuffer.prototype.appendBuffer = function (data) {
+            const entry = cap.entries.get(this);
+            if (entry && entry.bytes < 120 * 1024 * 1024) {
+                const mp = document.getElementById('movie_player');
+                if (_esAnuncioEnReproductor(mp, cap.workerVideoId)) {
+                    cap.vioAnuncio = true;
+                } else if (data) {
+                    const u8 =
+                        data instanceof ArrayBuffer
+                            ? new Uint8Array(data)
+                            : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+                    const copy = u8.slice();
+                    if (cap.vioAnuncio && _esSegmentoInitMedia(copy)) {
+                        entry.chunks = [];
+                        entry.bytes = 0;
+                        cap.vioAnuncio = false;
+                    }
+                    entry.chunks.push(copy);
+                    entry.bytes += copy.byteLength;
+                    cap.activeEntry = entry;
+                    cap.mime = entry.mime;
+                    cap.totalBytes = entry.bytes;
+                    cap.lastAppendAt = Date.now();
+                }
+            }
+            return origAppend.apply(this, arguments);
+        };
+    } catch {}
+}
+_installAudioSourceBufferHookOnce();
+
 if (!esIframe) {
     window.addEventListener('message', ev => {
         try {

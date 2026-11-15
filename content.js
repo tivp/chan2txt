@@ -29,6 +29,8 @@
                     method: detalle.method,
                     headers: detalle.headers,
                     body: detalle.body,
+                    bodyBase64: detalle.bodyBase64,
+                    responseType: detalle.responseType,
                     anonymous: detalle.anonymous,
                     timeout: detalle.timeout
                 },
@@ -57,6 +59,82 @@
         } catch {
             // La pestaña pudo cerrarse antes de abortar.
         }
+    });
+
+    window.addEventListener('maximus-bridge-stt', e => {
+        const detalle = e.detail;
+        if (!detalle?.requestId || !detalle?.op) return;
+        const eventoRes = `maximus-bridge-stt-res-${detalle.requestId}`;
+        const respondStt = payload => {
+            window.dispatchEvent(new CustomEvent(eventoRes, { detail: payload }));
+        };
+
+        if (detalle.op === 'ping') {
+            try {
+                chrome.runtime.sendMessage({ action: 'MAXIMUS_STT_PING' }, respuesta => {
+                    const payload = chrome.runtime.lastError
+                        ? { ok: false, error: chrome.runtime.lastError.message }
+                        : (respuesta || { ok: false, error: 'Sin respuesta STT del background' });
+                    respondStt(payload);
+                });
+            } catch (err) {
+                respondStt({ ok: false, error: err?.message || 'Error puente STT' });
+            }
+            return;
+        }
+
+        const enviarDirectoAOffscreen = async () => {
+            await new Promise(resolve => {
+                chrome.runtime.sendMessage({ action: 'MAXIMUS_STT_ENSURE' }, () => resolve());
+            });
+            for (let i = 0; i < 20; i++) {
+                const intento = await new Promise(resolve => {
+                    chrome.runtime.sendMessage(
+                        {
+                            target: 'chan2txt-offscreen',
+                            action: 'OFFSCREEN_TRANSCRIBE_PCM16',
+                            pcm16B64: detalle.pcm16B64 || '',
+                            language: detalle.language || 'es',
+                            modelId: detalle.modelId || ''
+                        },
+                        res => {
+                            if (chrome.runtime.lastError) {
+                                resolve({ __retry: chrome.runtime.lastError.message });
+                            } else {
+                                resolve(res || { ok: false, error: 'Sin respuesta offscreen' });
+                            }
+                        }
+                    );
+                });
+                if (!intento?.__retry) return intento;
+                if (!/Receiving end does not exist|message port closed/i.test(intento.__retry)) {
+                    throw new Error(intento.__retry);
+                }
+                await new Promise(r => setTimeout(r, 150));
+            }
+            // Fallback por Service Worker si el canal directo no enganchó
+            return new Promise(resolve => {
+                chrome.runtime.sendMessage(
+                    {
+                        action: 'MAXIMUS_STT_TRANSCRIBE',
+                        pcm16B64: detalle.pcm16B64 || '',
+                        language: detalle.language || 'es',
+                        modelId: detalle.modelId || ''
+                    },
+                    res => {
+                        resolve(
+                            chrome.runtime.lastError
+                                ? { ok: false, error: chrome.runtime.lastError.message }
+                                : (res || { ok: false, error: 'Sin respuesta STT del background' })
+                        );
+                    }
+                );
+            });
+        };
+
+        enviarDirectoAOffscreen()
+            .then(respondStt)
+            .catch(err => respondStt({ ok: false, error: err?.message || 'Error puente STT' }));
     });
 
     window.addEventListener('maximus-bridge-notify', e => {

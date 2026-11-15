@@ -22,6 +22,47 @@ const ORDEN_MODULOS = [
 
 const controladoresActivos = new Map();
 const infoNotificaciones = new Map();
+let offscreenCreando = null;
+
+function arrayBufferToBase64(buf) {
+    const bytes = new Uint8Array(buf);
+    const chunk = 0x8000;
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += chunk) {
+        bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    return btoa(bin);
+}
+
+function base64ToUint8Array(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) {
+        out[i] = bin.charCodeAt(i);
+    }
+    return out;
+}
+
+async function asegurarOffscreenWhisper() {
+    if (typeof chrome.offscreen === 'undefined') {
+        throw new Error('La extensión requiere recargarse en chrome://extensions para habilitar Whisper local (offscreen).');
+    }
+    if (typeof chrome.offscreen.hasDocument === 'function' && (await chrome.offscreen.hasDocument())) {
+        return;
+    }
+    if (!offscreenCreando) {
+        offscreenCreando = chrome.offscreen
+            .createDocument({
+                url: 'offscreen.html',
+                reasons: ['WORKERS', 'AUDIO_PLAYBACK'],
+                justification: 'Ejecutar Whisper WebGPU/WASM local para videos sin subtítulos.'
+            })
+            .finally(() => {
+                offscreenCreando = null;
+            });
+    }
+    await offscreenCreando;
+}
 
 function tieneSoporteUserScripts() {
     return typeof chrome.userScripts !== 'undefined' && typeof chrome.userScripts.register === 'function';
@@ -264,8 +305,64 @@ if (chrome.notifications?.onClicked) {
     });
 }
 
+async function enviarMensajeAOffscreenSeguro(payload) {
+    await asegurarOffscreenWhisper();
+    let ultimoError = null;
+    for (let i = 0; i < 30; i++) {
+        try {
+            return await chrome.runtime.sendMessage({
+                target: 'chan2txt-offscreen',
+                ...payload
+            });
+        } catch (err) {
+            ultimoError = err;
+            const msg = String(err?.message || err || '');
+            if (!/Receiving end does not exist|message port closed/i.test(msg)) {
+                throw err;
+            }
+            await new Promise(r => setTimeout(r, 150));
+        }
+    }
+    throw ultimoError || new Error('Offscreen Whisper no respondió tras inicializar');
+}
+
 chrome.runtime.onMessage.addListener((mensaje, sender, enviarRespuesta) => {
     if (!mensaje || typeof mensaje !== 'object') return false;
+    if (mensaje.target === 'chan2txt-offscreen') return false;
+
+    if (mensaje.action === 'MAXIMUS_STT_ENSURE') {
+        if (typeof chrome.offscreen === 'undefined') {
+            enviarRespuesta({ ok: false, error: 'Offscreen no disponible' });
+            return false;
+        }
+        asegurarOffscreenWhisper()
+            .then(() => enviarRespuesta({ ok: true }))
+            .catch(err => enviarRespuesta({ ok: false, error: err?.message || String(err) }));
+        return true;
+    }
+
+    if (mensaje.action === 'MAXIMUS_STT_PING') {
+        if (typeof chrome.offscreen === 'undefined') {
+            enviarRespuesta({ ok: false, offscreenDisponible: false });
+            return false;
+        }
+        enviarMensajeAOffscreenSeguro({ action: 'OFFSCREEN_PING' })
+            .then(res => enviarRespuesta({ ...res, offscreenDisponible: Boolean(res?.ok) }))
+            .catch(err => enviarRespuesta({ ok: false, offscreenDisponible: false, error: err?.message }));
+        return true;
+    }
+
+    if (mensaje.action === 'MAXIMUS_STT_TRANSCRIBE') {
+        enviarMensajeAOffscreenSeguro({
+            action: 'OFFSCREEN_TRANSCRIBE_PCM16',
+            pcm16B64: mensaje.pcm16B64,
+            language: mensaje.language || 'es',
+            modelId: mensaje.modelId || ''
+        })
+            .then(enviarRespuesta)
+            .catch(err => enviarRespuesta({ ok: false, error: err?.message || String(err) }));
+        return true;
+    }
 
     if (mensaje.action === 'MAXIMUS_ABORT') {
         const ctrl = controladoresActivos.get(mensaje.requestId);
@@ -308,6 +405,8 @@ chrome.runtime.onMessage.addListener((mensaje, sender, enviarRespuesta) => {
             method = 'GET',
             headers = {},
             body,
+            bodyBase64 = '',
+            responseType = 'text',
             anonymous = false,
             timeout = 16000
         } = mensaje;
@@ -315,17 +414,33 @@ chrome.runtime.onMessage.addListener((mensaje, sender, enviarRespuesta) => {
         if (requestId) controladoresActivos.set(requestId, ctrl);
 
         const reloj = setTimeout(() => ctrl.abort(), timeout);
+        const finalBody =
+            method === 'GET' || method === 'HEAD'
+                ? undefined
+                : bodyBase64
+                  ? base64ToUint8Array(bodyBase64)
+                  : body;
 
         fetch(url, {
             method,
             headers,
-            body: method === 'GET' || method === 'HEAD' ? undefined : body,
+            body: finalBody,
             credentials: anonymous ? 'omit' : 'include',
             cache: 'no-store',
             redirect: 'follow',
             signal: ctrl.signal
         })
             .then(async r => {
+                if (responseType === 'base64') {
+                    const buf = await r.arrayBuffer();
+                    enviarRespuesta({
+                        status: r.status,
+                        text: '',
+                        base64: arrayBufferToBase64(buf),
+                        finalUrl: r.url || url
+                    });
+                    return;
+                }
                 const text = await r.text();
                 enviarRespuesta({
                     status: r.status,
